@@ -3,6 +3,7 @@
 // an optional `lead` object to push to Bitrix24, and whether to notify a human.
 
 const CONTACT_PHONE = "+971 58 532 9288";
+const WHATSAPP_LINK = "https://wa.me/971585329288";
 const SITE = "https://coffee-go.ae";
 
 const MAIN_MENU = [
@@ -15,7 +16,7 @@ const MAIN_MENU = [
 function welcome() {
   return {
     text:
-      "Hi! I'm the CoffeeGo assistant ☕\n\n" +
+      "Hi! I'm the CoffeeGo AI assistant 🤖 (an automated bot — a real person can join anytime).\n\n" +
       "We install and fully service self-service coffee machines across the UAE — " +
       "free machine, free install, free maintenance. You only pay for what's consumed.\n\n" +
       "What can I help you with? Reply with a number:\n" +
@@ -142,13 +143,13 @@ export function handleMessage(session, rawText) {
       };
 
       const closing = d.wantsHuman
-        ? "Perfect — our team will reach out shortly. Meanwhile, feel free to call us directly:"
-        : "All set! Our team will send you a tailored quote within one business day. You can also reach us directly:";
+        ? `A real person from our team will reach out shortly. Want to talk right now? Message us on WhatsApp:\n💬 ${WHATSAPP_LINK}\n📞 ${CONTACT_PHONE}`
+        : `All set! Our team will send you a tailored quote within one business day. You can also reach us directly:\n📞 ${CONTACT_PHONE}\n💬 ${WHATSAPP_LINK}`;
 
       return {
         replies: [{
           text:
-            `${closing}\n📞 ${CONTACT_PHONE}\n🌐 ${SITE}\n\n` +
+            `${closing}\n🌐 ${SITE}\n\n` +
             `Type "menu" anytime to start over.`,
         }],
         lead,

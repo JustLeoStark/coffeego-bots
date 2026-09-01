@@ -39,6 +39,10 @@ app.post("/telegram/webhook", async (req, res) => {
   if (!msg || !msg.chat) return;
   const chatId = msg.chat.id;
   const text = msg.text || "";
+  if (text.trim() === "/id") {
+    await sendTelegram(chatId, `Your Telegram chat ID: ${chatId}`);
+    return;
+  }
   try {
     await handleIncoming("telegram", chatId, text, (t, buttons) => sendTelegram(chatId, t, buttons));
   } catch (e) {
