@@ -1,0 +1,19 @@
+{
+  "name": "coffeego-bots",
+  "version": "1.0.0",
+  "description": "CoffeeGo lead bot — Telegram + WhatsApp (Meta Cloud API) with Bitrix24 lead hand-off",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
