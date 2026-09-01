@@ -25,6 +25,17 @@ export async function notifyAdminTelegram(text) {
   await sendTelegram(ADMIN_CHAT_ID, "🔔 " + text);
 }
 
+// Re-send a photo (by Telegram file_id) to the admin chat.
+export async function sendPhotoToAdmin(fileId, caption) {
+  if (!ADMIN_CHAT_ID || !TOKEN) return;
+  const res = await fetch(API("sendPhoto"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: ADMIN_CHAT_ID, photo: fileId, caption: caption || "" }),
+  });
+  if (!res.ok) console.error("[telegram] sendPhoto failed:", res.status, await res.text());
+}
+
 // Register the webhook URL with Telegram (call once, or use setWebhook manually).
 export async function setTelegramWebhook(publicUrl) {
   if (!TOKEN) return;

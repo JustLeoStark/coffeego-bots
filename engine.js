@@ -11,6 +11,7 @@ const MAIN_MENU = [
   { id: "2", label: "🏢 Coffee point for my building / property" },
   { id: "3", label: "📈 Investing / partnership" },
   { id: "4", label: "💬 Talk to a person" },
+  { id: "5", label: "🛠 Report a problem / ask a question" },
 ];
 
 function welcome() {
@@ -78,12 +79,46 @@ export function handleMessage(session, rawText) {
           }],
         };
       }
-      if (t === "4") {
+      if (t === "4" || t.includes("talk") || t.includes("person")) {
         session.step = "ask_name";
         session.data = { category: "Human hand-off", wantsHuman: true };
-        return { replies: [{ text: "Of course — I'll connect you with our team. What's your name?" }] };
+        return { replies: [{ text: "Of course — a real person from our team will help you. What's your name?" }] };
       }
-      return { replies: [{ text: "Please reply with 1, 2, 3 or 4:", buttons: MAIN_MENU }] };
+      if (t === "5" || t.includes("problem") || t.includes("question") || t.includes("complain") || t.includes("report") || t.includes("issue")) {
+        session.step = "support_desc";
+        session.data = { category: "Support / complaint", wantsHuman: true };
+        return {
+          replies: [{
+            text:
+              "Sorry for the trouble. Please describe what happened — for example: paid but nothing poured, wrong drink, machine not working, or a delivery issue at an office.",
+          }],
+        };
+      }
+      return { replies: [{ text: "Please reply with 1, 2, 3, 4 or 5:", buttons: MAIN_MENU }] };
+    }
+
+    case "support_desc": {
+      session.data.issue = text;
+      session.step = "support_photo";
+      return {
+        replies: [{
+          text:
+            "Got it. If you can, attach a photo of the result and your receipt (just send a photo). Or type \"skip\" to continue.",
+        }],
+      };
+    }
+    case "support_photo": {
+      // A photo (if sent) is captured and forwarded to the team in the channel layer.
+      if (!session.data.photoNote && !/skip|no|none/i.test(t)) {
+        session.data.photoNote = text && text !== "[photo]" ? `Note: ${text}` : "Photo attached";
+      }
+      session.step = "support_location";
+      return { replies: [{ text: "Which machine or location is this about? (office name, building, or area)" }] };
+    }
+    case "support_location": {
+      session.data.location = text;
+      session.step = "ask_name";
+      return { replies: [{ text: "Thank you. What's your name?" }] };
     }
 
     case "office_location": {
@@ -123,10 +158,13 @@ export function handleMessage(session, rawText) {
       session.data.phone = text;
       session.step = "done";
       const d = session.data;
+      const isSupport = d.category === "Support / complaint";
       const summaryLines = [
-        `New CoffeeGo lead — ${d.category}`,
+        `New CoffeeGo ${isSupport ? "SUPPORT / COMPLAINT" : "lead"} — ${d.category}`,
         d.name ? `Name: ${d.name}` : null,
         d.phone ? `Phone: ${d.phone}` : null,
+        d.issue ? `Issue: ${d.issue}` : null,
+        d.photoNote ? d.photoNote : null,
         d.location ? `Location: ${d.location}` : null,
         d.teamSize ? `Team size: ${d.teamSize}` : null,
         d.spaceType ? `Space: ${d.spaceType}` : null,
@@ -142,7 +180,9 @@ export function handleMessage(session, rawText) {
         wantsHuman: !!d.wantsHuman,
       };
 
-      const closing = d.wantsHuman
+      const closing = isSupport
+        ? `Thank you — your report has been sent to our team and they'll get back to you as soon as possible. For anything urgent, reach us now on WhatsApp:\n💬 ${WHATSAPP_LINK}\n📞 ${CONTACT_PHONE}`
+        : d.wantsHuman
         ? `A real person from our team will reach out shortly. Want to talk right now? Message us on WhatsApp:\n💬 ${WHATSAPP_LINK}\n📞 ${CONTACT_PHONE}`
         : `All set! Our team will send you a tailored quote within one business day. You can also reach us directly:\n📞 ${CONTACT_PHONE}\n💬 ${WHATSAPP_LINK}`;
 

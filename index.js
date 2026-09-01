@@ -3,7 +3,7 @@
 import express from "express";
 import { handleMessage } from "./engine.js";
 import { createLead } from "./bitrix.js";
-import { sendTelegram, notifyAdminTelegram, setTelegramWebhook } from "./telegram.js";
+import { sendTelegram, notifyAdminTelegram, sendPhotoToAdmin, setTelegramWebhook } from "./telegram.js";
 import { sendWhatsApp, verifyWhatsAppWebhook, parseWhatsAppMessages } from "./whatsapp.js";
 
 const app = express();
@@ -38,12 +38,22 @@ app.post("/telegram/webhook", async (req, res) => {
   const msg = req.body?.message;
   if (!msg || !msg.chat) return;
   const chatId = msg.chat.id;
-  const text = msg.text || "";
+  const photoId = Array.isArray(msg.photo) && msg.photo.length ? msg.photo[msg.photo.length - 1].file_id : null;
+  const text = (msg.text || msg.caption || (photoId ? "[photo]" : "")).toString();
   if (text.trim() === "/id") {
     await sendTelegram(chatId, `Your Telegram chat ID: ${chatId}`);
     return;
   }
   try {
+    // During a support/complaint flow, forward any attached photo to the team.
+    if (photoId) {
+      const sess = getSession(`telegram:${chatId}`);
+      if (String(sess.step).startsWith("support")) {
+        sess.data = sess.data || {};
+        sess.data.photoNote = "Photo attached (forwarded to team)";
+        await sendPhotoToAdmin(photoId, `📷 Support photo from chat ${chatId}${msg.caption ? " — " + msg.caption : ""}`);
+      }
+    }
     await handleIncoming("telegram", chatId, text, (t, buttons) => sendTelegram(chatId, t, buttons));
   } catch (e) {
     console.error("[telegram] handler error:", e);
