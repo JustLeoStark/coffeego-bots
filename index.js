@@ -2,6 +2,7 @@
 // One conversation engine drives both channels; qualified chats become Bitrix24 leads.
 import express from "express";
 import { handleMessage } from "./engine.js";
+import { askAI } from "./ai.js";
 import { createLead } from "./bitrix.js";
 import { sendTelegram, notifyAdminTelegram, sendPhotoToAdmin, setTelegramWebhook } from "./telegram.js";
 import { sendWhatsApp, verifyWhatsAppWebhook, parseWhatsAppMessages } from "./whatsapp.js";
@@ -18,7 +19,7 @@ function getSession(key) {
 
 async function handleIncoming(channel, userId, text, send) {
   const session = getSession(`${channel}:${userId}`);
-  const result = handleMessage(session, text);
+  const result = await handleMessage(session, text, { askAI });
   for (const reply of result.replies) {
     await send(reply.text, reply.buttons);
   }
@@ -48,7 +49,7 @@ app.post("/telegram/webhook", async (req, res) => {
     // During a support/complaint flow, forward any attached photo to the team.
     if (photoId) {
       const sess = getSession(`telegram:${chatId}`);
-      if (String(sess.step).startsWith("support")) {
+      if (String(sess.step).startsWith("support") || sess.step === "ai_chat") {
         sess.data = sess.data || {};
         sess.data.photoNote = "Photo attached (forwarded to team)";
         await sendPhotoToAdmin(photoId, `📷 Support photo from chat ${chatId}${msg.caption ? " — " + msg.caption : ""}`);

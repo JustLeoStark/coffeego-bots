@@ -31,7 +31,8 @@ function normalize(text) {
 }
 
 // Returns { replies:[{text,buttons?}], lead?, notifyHuman?, reset? }
-export function handleMessage(session, rawText) {
+// deps.askAI(history, userText) -> { reply, is_complaint, complaint_type, needs_photo, wants_contact }
+export async function handleMessage(session, rawText, deps = {}) {
   const text = (rawText || "").trim();
   const t = normalize(text);
   session.data = session.data || {};
@@ -85,40 +86,48 @@ export function handleMessage(session, rawText) {
         return { replies: [{ text: "Of course — a real person from our team will help you. What's your name?" }] };
       }
       if (t === "5" || t.includes("problem") || t.includes("question") || t.includes("complain") || t.includes("report") || t.includes("issue")) {
-        session.step = "support_desc";
-        session.data = { category: "Support / complaint", wantsHuman: true };
+        session.step = "ai_chat";
+        session.data = { category: "Question / support" };
+        session.aiHistory = [];
         return {
           replies: [{
             text:
-              "Sorry for the trouble. Please describe what happened — for example: paid but nothing poured, wrong drink, machine not working, or a delivery issue at an office.",
+              "I'm the CoffeeGo AI assistant 🤖 — please describe your question or problem. " +
+              "Thanks for reaching out, we're always here to help.",
           }],
         };
       }
       return { replies: [{ text: "Please reply with 1, 2, 3, 4 or 5:", buttons: MAIN_MENU }] };
     }
 
-    case "support_desc": {
-      session.data.issue = text;
-      session.step = "support_photo";
-      return {
-        replies: [{
-          text:
-            "Got it. If you can, attach a photo of the result and your receipt (just send a photo). Or type \"skip\" to continue.",
-        }],
-      };
-    }
-    case "support_photo": {
-      // A photo (if sent) is captured and forwarded to the team in the channel layer.
-      if (!session.data.photoNote && !/skip|no|none/i.test(t)) {
-        session.data.photoNote = text && text !== "[photo]" ? `Note: ${text}` : "Photo attached";
+    case "ai_chat": {
+      session.aiHistory = session.aiHistory || [];
+      const ai = deps.askAI
+        ? await deps.askAI(session.aiHistory, text)
+        : { reply: "Our team will help you shortly.", is_complaint: false, complaint_type: "", needs_photo: false, wants_contact: true };
+      session.aiHistory.push({ role: "user", content: text });
+      session.aiHistory.push({ role: "assistant", content: ai.reply });
+      if (session.aiHistory.length > 20) session.aiHistory = session.aiHistory.slice(-20);
+
+      if (ai.is_complaint) {
+        session.data.category = "Support / complaint";
+        session.data.wantsHuman = true;
+        if (!session.data.issue) session.data.issue = text;
       }
-      session.step = "support_location";
-      return { replies: [{ text: "Which machine or location is this about? (office name, building, or area)" }] };
-    }
-    case "support_location": {
-      session.data.location = text;
-      session.step = "ask_name";
-      return { replies: [{ text: "Thank you. What's your name?" }] };
+      if (ai.needs_photo) session.data.needPhoto = true;
+
+      // 1) If a photo was requested but not yet received, keep waiting for it.
+      if (session.data.needPhoto && !session.data.photoNote) {
+        return { replies: [{ text: ai.reply }] };
+      }
+      // 2) Once it's a complaint or the user wants a human, collect contact to file a ticket.
+      if (ai.wants_contact && !session.data.askedContact) {
+        session.data.askedContact = true;
+        session.step = "ask_name";
+        return { replies: [{ text: `${ai.reply}\n\nCould I take your name so our team can follow up?` }] };
+      }
+      // 3) Otherwise just keep answering.
+      return { replies: [{ text: ai.reply }] };
     }
 
     case "office_location": {
