@@ -16,7 +16,7 @@ function getSession(key) {
   return sessions.get(key);
 }
 
-async function process(channel, userId, text, send) {
+async function handleIncoming(channel, userId, text, send) {
   const session = getSession(`${channel}:${userId}`);
   const result = handleMessage(session, text);
   for (const reply of result.replies) {
@@ -40,7 +40,7 @@ app.post("/telegram/webhook", async (req, res) => {
   const chatId = msg.chat.id;
   const text = msg.text || "";
   try {
-    await process("telegram", chatId, text, (t, buttons) => sendTelegram(chatId, t, buttons));
+    await handleIncoming("telegram", chatId, text, (t, buttons) => sendTelegram(chatId, t, buttons));
   } catch (e) {
     console.error("[telegram] handler error:", e);
   }
@@ -57,7 +57,7 @@ app.post("/whatsapp/webhook", async (req, res) => {
   res.sendStatus(200);
   try {
     for (const m of parseWhatsAppMessages(req.body)) {
-      await process("whatsapp", m.from, m.text, (t) => sendWhatsApp(m.from, t));
+      await handleIncoming("whatsapp", m.from, m.text, (t) => sendWhatsApp(m.from, t));
     }
   } catch (e) {
     console.error("[whatsapp] handler error:", e);
