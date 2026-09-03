@@ -1,6 +1,8 @@
 // CoffeeGo AI brain — Anthropic Claude Haiku.
-// Understands any language, replies in the user's language, answers from the
-// knowledge base, detects complaints, and decides when to ask for a photo / a human.
+// Understands any language, replies in the user's language, answers ONLY from the
+// knowledge base + answers learned from staff, detects complaints, and decides
+// when to ask for a photo / a human. It never invents facts.
+import { getLearned } from "./store.js";
 const KEY = process.env.ANTHROPIC_API_KEY || "";
 const MODEL = process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-latest";
 
@@ -30,17 +32,28 @@ export async function askAI(history, userText) {
       is_complaint: false, complaint_type: "", needs_photo: false, wants_contact: true,
     };
   }
+  // Answers the team has given before — the bot learns from these.
+  let learnedBlock = "";
+  try {
+    const learned = await getLearned(40);
+    if (learned.length) {
+      learnedBlock = "\n\nLEARNED ANSWERS (from our team — prefer these, they are authoritative):\n" +
+        learned.map((p) => `Q: ${p.q}\nA: ${p.a}`).join("\n---\n");
+    }
+  } catch { /* store optional */ }
+
   const system =
     `You are CoffeeGo's AI support assistant — an automated bot (say so if asked; a human can join anytime). ` +
     `Detect the user's language from their message and ALWAYS reply in that same language. Be warm, concise and professional. ` +
-    `Answer ONLY from the knowledge below; if you don't know, say you'll connect a human. ` +
+    `CRITICAL: Answer ONLY using the KNOWLEDGE and LEARNED ANSWERS below. NEVER invent or guess prices, policies, numbers, timelines, availability or any fact that is not written there. ` +
+    `If the answer is not covered, do NOT make anything up — say you'll connect a team member and set wants_contact true. ` +
     `If the user reports a COMPLAINT (e.g. paid but nothing poured, wrong drink poured, delivery/refill delay, machine broken), ` +
     `sincerely apologize and reassure them the team will resolve it. ` +
     `ONLY when the complaint is "paid but nothing poured" or "wrong drink poured", ask them to attach a photo of the result AND the payment receipt or screenshot. ` +
-    `For general questions, just answer helpfully. Keep replies short.\n\nKNOWLEDGE:\n${KB}\n\n` +
+    `Keep replies short.\n\nKNOWLEDGE:\n${KB}${learnedBlock}\n\n` +
     `Respond ONLY as strict minified JSON with keys: reply (string, ready to send to the user, in their language), ` +
     `is_complaint (boolean), complaint_type (short string or ""), needs_photo (boolean), wants_contact (boolean). ` +
-    `Set wants_contact true when it is a complaint, the user asks for a human, or you should collect their contact to follow up. No text outside the JSON.`;
+    `Set wants_contact true when it is a complaint, the user asks for a human, or the question is not covered by the knowledge/learned answers. No text outside the JSON.`;
 
   const messages = [...(history || []), { role: "user", content: userText }];
   try {

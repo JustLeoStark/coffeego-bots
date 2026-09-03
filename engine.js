@@ -189,21 +189,25 @@ export async function handleMessage(session, rawText, deps = {}) {
         wantsHuman: !!d.wantsHuman,
       };
 
-      const closing = isSupport
-        ? `Thank you — your report has been sent to our team and they'll get back to you as soon as possible. For anything urgent, reach us now on WhatsApp:\n💬 ${WHATSAPP_LINK}\n📞 ${CONTACT_PHONE}`
-        : d.wantsHuman
-        ? `A real person from our team will reach out shortly. Want to talk right now? Message us on WhatsApp:\n💬 ${WHATSAPP_LINK}\n📞 ${CONTACT_PHONE}`
-        : `All set! Our team will send you a tailored quote within one business day. You can also reach us directly:\n📞 ${CONTACT_PHONE}\n💬 ${WHATSAPP_LINK}`;
-
+      // Hand the client over to a live team member (two-way relay opens in index.js).
+      session.step = "handoff";
       return {
         replies: [{
           text:
-            `${closing}\n🌐 ${SITE}\n\n` +
+            `Thanks, ${d.name}! You're now connected to our team here — a colleague will reply in this chat shortly. ` +
+            `Feel free to keep typing. For anything urgent: 💬 ${WHATSAPP_LINK} · 📞 ${CONTACT_PHONE}\n\n` +
             `Type "menu" anytime to start over.`,
         }],
         lead,
         notifyHuman: true,
+        openHandoff: { category: d.category, summary: summaryLines.join("\n"), name: d.name },
       };
+    }
+
+    case "handoff": {
+      // While connected to an agent, messages are relayed in the channel layer.
+      // (index.js intercepts before reaching here; this is a safety net.)
+      return { replies: [] };
     }
 
     case "done":

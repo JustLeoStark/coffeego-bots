@@ -25,15 +25,45 @@ export async function notifyAdminTelegram(text) {
   await sendTelegram(ADMIN_CHAT_ID, "🔔 " + text);
 }
 
-// Re-send a photo (by Telegram file_id) to the admin chat.
-export async function sendPhotoToAdmin(fileId, caption) {
-  if (!ADMIN_CHAT_ID || !TOKEN) return;
+// Route a lead category to the right employee's chat id (env-driven).
+// Falls back to the admin chat when a role is not configured.
+export function routeChatId(category) {
+  const c = (category || "").toLowerCase();
+  const env = process.env;
+  const admin = env.TELEGRAM_ADMIN_CHAT_ID || "";
+  if (c.includes("support") || c.includes("complaint") || c.includes("question")) {
+    return env.TELEGRAM_SUPPORT_CHAT_ID || admin;
+  }
+  if (c.includes("invest") || c.includes("partner")) {
+    return env.TELEGRAM_INVEST_CHAT_ID || admin;
+  }
+  if (c.includes("office") || c.includes("developer") || c.includes("building") || c.includes("hand")) {
+    return env.TELEGRAM_SALES_CHAT_ID || admin;
+  }
+  return admin;
+}
+
+// Notify the employee responsible for this category (with admin fallback).
+export async function notifyRole(category, text) {
+  const id = routeChatId(category);
+  if (!id) return;
+  await sendTelegram(id, "🔔 " + text);
+}
+
+// Re-send a photo (by Telegram file_id) to a specific chat.
+export async function sendPhotoToChat(chatId, fileId, caption) {
+  if (!chatId || !TOKEN) return;
   const res = await fetch(API("sendPhoto"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: ADMIN_CHAT_ID, photo: fileId, caption: caption || "" }),
+    body: JSON.stringify({ chat_id: chatId, photo: fileId, caption: caption || "" }),
   });
   if (!res.ok) console.error("[telegram] sendPhoto failed:", res.status, await res.text());
+}
+
+// Back-compat: photo to the admin chat.
+export async function sendPhotoToAdmin(fileId, caption) {
+  await sendPhotoToChat(ADMIN_CHAT_ID, fileId, caption);
 }
 
 // Register the webhook URL with Telegram (call once, or use setWebhook manually).
