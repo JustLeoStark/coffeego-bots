@@ -18,7 +18,7 @@ MACHINES & DRINKS: Bean-to-cup machines (Jetinno, Necta) and Rocket Espresso; es
 latte, cappuccino and more. Freshly roasted in Dubai.
 PAYMENT AT MACHINE: Card and app payments supported.
 REQUIREMENTS: About 1–2 m² of space, a power socket and (for some models) water.
-COVERAGE: 120+ locations across the UAE. Typical response within 1 business day.
+COVERAGE: 117 self-service machines across the UAE (Dubai, Abu Dhabi, Sharjah). Typical response within 1 business day.
 FOR DEVELOPERS/PROPERTY MANAGERS: A free coffee point adds comfort for residents, buyers and guests.
 SUPPORT: For payment or machine issues, the team resolves them quickly and can arrange a refund
 where appropriate. Escalation via WhatsApp/phone +971 58 532 9288.
