@@ -77,3 +77,10 @@ Change wording, add questions, or add branches there. `SCRIPT.md` describes the 
 - Sessions are in-memory: a restart forgets in-progress chats (finished leads are already
   in Bitrix). For heavy volume, swap the `Map` in `index.js` for Redis.
 - No secrets are committed — everything sensitive lives in `.env`.
+
+
+## Website leads (Netlify Forms → Telegram → Bitrix)
+
+Netlify → Project configuration → Notifications → Form submission notifications → **Add notification → Outgoing webhook**:
+event `New form submission`, URL `PUBLIC_URL/netlify/lead?key=<NETLIFY_LEAD_SECRET>` (key optional).
+The bot forwards every website form to the sales responsible (`/assign sales <id>`), copies the admin, and creates a Bitrix lead when the webhook is configured.

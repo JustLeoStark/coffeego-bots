@@ -5,7 +5,7 @@ import express from "express";
 import { handleMessage } from "./engine.js";
 import { askAI } from "./ai.js";
 import { createLead } from "./bitrix.js";
-import { sendTelegram, sendPhotoToChat, setTelegramWebhook } from "./telegram.js";
+import { sendTelegram, sendPhotoToChat, setTelegramWebhook, notifyAdminTelegram } from "./telegram.js";
 import { sendWhatsApp, verifyWhatsAppWebhook, parseWhatsAppMessages } from "./whatsapp.js";
 import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
@@ -191,6 +191,42 @@ app.post("/whatsapp/webhook", async (req, res) => {
   } catch (e) {
     console.error("[whatsapp] handler error:", e);
   }
+});
+
+
+// ---- Website leads (Netlify Forms outgoing webhook) ----
+// Netlify posts JSON: { form_name, data: {name,email,phone,company,people,message,option,...}, site_url, created_at }
+app.post("/netlify/lead", async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const b = req.body || {};
+    const d = b.data || {};
+    const secret = process.env.NETLIFY_LEAD_SECRET;
+    if (secret && req.query.key !== secret) { console.warn("[netlify] bad key"); return; }
+    const form = b.form_name || d["form-name"] || "contact";
+    const isNews = form === "newsletter";
+    const lines = [
+      `🌐 New website lead${isNews ? " (newsletter)" : ""}`,
+      d.option ? `Interest: ${d.option}` : null,
+      d.name ? `Name: ${d.name}` : null,
+      d.company ? `Company: ${d.company}` : null,
+      d.phone ? `Phone: ${d.phone}` : null,
+      d.email ? `Email: ${d.email}` : null,
+      d.people ? `People/footfall: ${d.people}` : null,
+      d.message ? `Message: ${d.message}` : null,
+      b.site_url ? `Source: ${b.site_url}` : null,
+    ].filter(Boolean);
+    const text = lines.join("\n");
+    const category = /invest/i.test(d.option || "") ? "Invest" : "Sales";
+    const agent = await resolveAgent(category.toLowerCase() === "invest" ? "Invest" : "Sales / office");
+    if (agent) await sendTelegram(agent, "🔔 " + text);
+    if (String(agent) !== ADMIN) await notifyAdminTelegram(text);
+    if (!isNews) {
+      const r = await createLead({ title: `Website: ${d.option || form} — ${d.name || d.company || d.email || "lead"}`, name: d.name, phone: d.phone, email: d.email,
+        comments: [d.company && `Company: ${d.company}`, d.people && `People: ${d.people}`, d.message, b.site_url && `Page: ${b.site_url}`].filter(Boolean).join("\n") });
+      if (!r.ok) console.log("[netlify] lead not sent to Bitrix:", r.error || "not configured");
+    }
+  } catch (e) { console.error("[netlify] handler error:", e); }
 });
 
 app.get("/", (_req, res) => res.send("CoffeeGo bot is running."));
