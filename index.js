@@ -6,14 +6,21 @@ import { handleMessage } from "./engine.js";
 import { askAI } from "./ai.js";
 import { createLead } from "./bitrix.js";
 import { sendTelegram, sendPhotoToChat, setTelegramWebhook, notifyAdminTelegram } from "./telegram.js";
-import { sendWhatsApp, verifyWhatsAppWebhook, parseWhatsAppMessages } from "./whatsapp.js";
+import {
+  sendWhatsApp, verifyWhatsAppWebhook, parseWhatsAppMessages,
+  parseWhatsAppStatuses, verifySignature, whatsappConfigured,
+} from "./whatsapp.js";
 import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
   setHandoff, getHandoff, clearHandoff, resolveAgent, addLearned,
 } from "./store.js";
 
 const app = express();
-app.use(express.json());
+// Сырое тело нужно, чтобы проверить подпись Meta: она считается по байтам
+// запроса, а express.json() их уже не отдаёт.
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 
 const ADMIN = String(process.env.TELEGRAM_ADMIN_CHAT_ID || "");
 const isAdmin = (id) => ADMIN && String(id) === ADMIN;
@@ -183,14 +190,47 @@ app.get("/whatsapp/webhook", (req, res) => {
 });
 
 app.post("/whatsapp/webhook", async (req, res) => {
+  // Подпись проверяем ДО ответа: чужой запрос обрабатывать не нужно.
+  if (!verifySignature(req.rawBody, req.get("x-hub-signature-256"))) {
+    console.warn("[whatsapp] bad signature — ignored");
+    return res.sendStatus(403);
+  }
+  // Meta ждёт 200 в пределах нескольких секунд, иначе шлёт повтор. Отвечаем
+  // сразу, разбираем после.
   res.sendStatus(200);
   try {
+    for (const s of parseWhatsAppStatuses(req.body)) {
+      if (s.status === "failed") {
+        console.error("[whatsapp] delivery failed to", s.to, ":", s.error);
+      }
+    }
     for (const m of parseWhatsAppMessages(req.body)) {
-      await runEngine("whatsapp", m.from, m.text, (t) => sendWhatsApp(m.from, t), "WhatsApp user");
+      const name = m.name ? `${m.name} (WhatsApp)` : "WhatsApp user";
+      // Файл без подписи: движок его не разберёт, но молчать нельзя —
+      // жалобы «не налил» приходят именно фотографией.
+      if (m.media && m.text.startsWith("[")) {
+        await sendWhatsApp(m.from,
+          "Спасибо, файл получил. Опишите, пожалуйста, что произошло — " +
+          "номер автомата и что именно случилось.");
+        continue;
+      }
+      await runEngine("whatsapp", m.from, m.text,
+        (t) => sendWhatsApp(m.from, t), name);
     }
   } catch (e) {
     console.error("[whatsapp] handler error:", e);
   }
+});
+
+// Диагностика: показывает, что настроено, без раскрытия секретов.
+app.get("/whatsapp/health", (_req, res) => {
+  res.json({
+    configured: whatsappConfigured(),
+    verify_token_set: Boolean(process.env.WHATSAPP_VERIFY_TOKEN),
+    app_secret_set: Boolean(process.env.WHATSAPP_APP_SECRET),
+    phone_id_set: Boolean(process.env.WHATSAPP_PHONE_ID),
+    time: new Date().toISOString(),
+  });
 });
 
 
@@ -239,4 +279,16 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`CoffeeGo bot listening on :${PORT}`);
   if (process.env.PUBLIC_URL) await setTelegramWebhook(process.env.PUBLIC_URL);
+
+  // Бесплатный Render усыпляет сервис через 15 минут тишины, а просыпается
+  // почти минуту. Telegram повторяет доставку долго и переживёт это, а Meta
+  // ждёт ответа секунды — первое сообщение клиента в WhatsApp просто
+  // потеряется. Поэтому будим себя сами, пока смысл есть.
+  if (process.env.PUBLIC_URL && process.env.KEEP_AWAKE !== "0") {
+    const url = `${process.env.PUBLIC_URL.replace(/\/$/, "")}/health`;
+    setInterval(() => {
+      fetch(url).catch(() => {});
+    }, 10 * 60 * 1000);
+    console.log("[keepalive] self-ping every 10 min →", url);
+  }
 });
