@@ -205,8 +205,11 @@ app.post("/netlify/lead", async (req, res) => {
     if (secret && req.query.key !== secret) { console.warn("[netlify] bad key"); return; }
     const form = b.form_name || d["form-name"] || "contact";
     const isNews = form === "newsletter";
+    const isInvest = form === "investor" || /invest/i.test(d.option || "");
+    const head = isNews ? "📰 Newsletter signup (website)" : isInvest ? "💼 INVESTOR REQUEST (website) — investor pack" : "🌐 New website lead — coffee machine enquiry";
+    const page = d.page || b.site_url || "";
     const lines = [
-      `🌐 New website lead${isNews ? " (newsletter)" : ""}`,
+      head,
       d.option ? `Interest: ${d.option}` : null,
       d.name ? `Name: ${d.name}` : null,
       d.company ? `Company: ${d.company}` : null,
@@ -214,11 +217,11 @@ app.post("/netlify/lead", async (req, res) => {
       d.email ? `Email: ${d.email}` : null,
       d.people ? `People/footfall: ${d.people}` : null,
       d.message ? `Message: ${d.message}` : null,
-      b.site_url ? `Source: ${b.site_url}` : null,
+      page ? `Page: ${page}` : null,
+      isInvest ? "→ Send the 2-page summary + data room link; book a 20-min call." : null,
     ].filter(Boolean);
     const text = lines.join("\n");
-    const category = /invest/i.test(d.option || "") ? "Invest" : "Sales";
-    const agent = await resolveAgent(category.toLowerCase() === "invest" ? "Invest" : "Sales / office");
+    const agent = await resolveAgent(isInvest ? "Invest" : "Sales / office");
     if (agent) await sendTelegram(agent, "🔔 " + text);
     if (String(agent) !== ADMIN) await notifyAdminTelegram(text);
     if (!isNews) {
