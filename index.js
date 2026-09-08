@@ -13,7 +13,11 @@ import {
 import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
   setHandoff, getHandoff, clearHandoff, resolveAgent, addLearned,
+  logTicket, logFirstReply, regionStats,
 } from "./store.js";
+import {
+  regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
+} from "./regions.js";
 
 const app = express();
 // Сырое тело нужно, чтобы проверить подпись Meta: она считается по байтам
@@ -33,8 +37,21 @@ function getSession(key) {
   return sessions.get(key);
 }
 
+// Ответ сотрудника уходит клиенту в тот канал, откуда он пришёл. Без этого
+// ответы на обращения из WhatsApp улетали бы в пустоту: id клиента там —
+// номер телефона, а не Telegram-чат.
+async function replyToClient(clientId, text, opts = {}) {
+  const ho = await getHandoff(clientId);
+  const body = opts.raw ? text : `👤 CoffeeGo team: ${text}`;
+  if (ho && ho.channel === "whatsapp") await sendWhatsApp(clientId, body);
+  else await sendTelegram(clientId, body);
+}
+
 // Run the AI/menu engine and, on completion, open a live handoff to an agent.
-async function runEngine(channel, userId, text, send, clientName) {
+// region — рынок клиента: он решает, кому уйдёт обращение и в какие часы
+// на него ответят. Для Telegram региона нет (номера не видно), там работает
+// общая роль.
+async function runEngine(channel, userId, text, send, clientName, region) {
   const session = getSession(`${channel}:${userId}`);
   const result = await handleMessage(session, text, { askAI });
   for (const reply of result.replies) await send(reply.text, reply.buttons);
@@ -44,18 +61,30 @@ async function runEngine(channel, userId, text, send, clientName) {
     result.lead._tag = r.ok ? `Bitrix lead #${r.id}` : `lead (Bitrix ${r.error || "not configured"})`;
   }
 
-  if (channel === "telegram" && result.openHandoff) {
-    const agent = await resolveAgent(result.openHandoff.category);
+  if (result.openHandoff) {
+    const agent = await resolveAgent(result.openHandoff.category, region);
     if (agent) {
-      await setHandoff(userId, { agentId: agent, category: result.openHandoff.category, name: clientName });
+      await setHandoff(userId, {
+        agentId: agent, category: result.openHandoff.category,
+        name: clientName, channel, region: region || null,
+        openedAt: Date.now(),
+      });
+      await logTicket(region || "telegram", result.openHandoff.category, agent);
       const tag = result.lead ? result.lead._tag : "";
+      const place = region ? ` · ${REGION_NAMES[region] || region}` : "";
       await sendTelegram(
         agent,
-        `🔔 New chat handed to you — ${result.openHandoff.category}\n[#${userId}] ${clientName}\n\n` +
+        `🔔 New chat handed to you — ${result.openHandoff.category}${place}\n` +
+          `[#${userId}] ${clientName}\n\n` +
           `${result.openHandoff.summary}\n(${tag})\n\n` +
           `↩️ Reply to this message (or any [#${userId}] message) to chat with the client.\n` +
           `Type /close ${userId} to end the chat.`
       );
+      // Вне рабочих часов региона клиент не должен сидеть в тишине.
+      if (region && !isWorkingHours(region)) {
+        const note = outOfHoursNote(region, /[а-яё]/i.test(text) ? "ru" : "en");
+        if (note) await send(note);
+      }
     }
   }
 }
@@ -89,17 +118,62 @@ app.post("/telegram/webhook", async (req, res) => {
       }
       if (t === "/assignments") {
         const a = await getAssignments();
-        await sendTelegram(chatId, `📌 Assignments:\nsupport: ${a.support || "(admin)"}\nsales: ${a.sales || "(admin)"}\ninvest: ${a.invest || "(admin)"}\ndefault: ${a.default || "(admin)"}`);
+        const lines = Object.entries(a).map(([k, v]) => {
+          const [role, reg] = k.split("@");
+          const place = reg ? ` · ${REGION_NAMES[reg] || reg}` : " · вся сеть";
+          return `${role}${place}: ${v || "(admin)"}`;
+        });
+        await sendTelegram(chatId,
+          "📌 Кто за что отвечает:\n" + lines.join("\n") +
+          "\n\nНазначить: /assign <роль>[@регион] <chat_id>\n" +
+          "Регионы: /regions");
+        return;
+      }
+      if (t === "/regions") {
+        const list = Object.entries(REGION_NAMES)
+          .map(([k, v]) => `${k} — ${v}`).join("\n");
+        await sendTelegram(chatId,
+          "🌍 Регионы (определяются по коду номера клиента):\n" + list +
+          `\n\nПо умолчанию: ${DEFAULT_REGION}.\n` +
+          "Пример: /assign support@ru 12345678 — поддержку по России ведёт " +
+          "этот сотрудник. Роль без региона работает как запасная для всех.");
+        return;
+      }
+      if (t.startsWith("/stats")) {
+        const days = Number((t.split(/\s+/)[1] || "30").replace(/\D/g, "")) || 30;
+        const s = await regionStats(days);
+        const rows = Object.entries(s.по_регионам);
+        if (!rows.length) {
+          await sendTelegram(chatId, `За ${days} дн. обращений не было.`);
+          return;
+        }
+        const lines = rows.map(([r, v]) =>
+          `${REGION_NAMES[r] || r}: обращений ${v.обращений}, ответов ` +
+          `${v.ответов}` +
+          (v.среднее_время_ответа_мин !== null
+            ? `, среднее время ответа ${v.среднее_время_ответа_мин} мин` : ""));
+        await sendTelegram(chatId,
+          `📊 Обращения за ${days} дн.:\n` + lines.join("\n"));
         return;
       }
       if (t.startsWith("/assign")) {
-        const [, role, id] = t.split(/\s+/);
+        const [, roleRaw, id] = t.split(/\s+/);
+        const [role, region] = String(roleRaw || "").split("@");
         const roles = ["support", "sales", "invest", "default"];
         if (!roles.includes(role) || !id) {
-          await sendTelegram(chatId, "Usage: /assign <support|sales|invest|default> <chat_id>");
+          await sendTelegram(chatId,
+            "Как назначать:\n" +
+            "/assign support 12345678 — на всю сеть\n" +
+            "/assign support@ru 12345678 — только по России\n" +
+            "Список регионов: /regions");
+        } else if (region && !REGION_NAMES[region]) {
+          await sendTelegram(chatId,
+            `Регион «${region}» не знаю. Доступные: /regions`);
         } else {
-          await setAssignment(role, id);
-          await sendTelegram(chatId, `✅ ${role} is now handled by ${id}.`);
+          await setAssignment(roleRaw, id);
+          const place = region
+            ? ` по региону «${REGION_NAMES[region]}»` : " на всю сеть";
+          await sendTelegram(chatId, `✅ ${role}${place} — теперь ${id}.`);
         }
         return;
       }
@@ -127,13 +201,15 @@ app.post("/telegram/webhook", async (req, res) => {
       const cid = closeMatch[1];
       await clearHandoff(cid);
       await sendTelegram(chatId, `✅ Chat with ${cid} closed.`);
-      await sendTelegram(cid, "Our team member has closed this chat. Type \"menu\" if you need anything else. Thank you! ☕");
+      await replyToClient(cid,
+        "Our team member has closed this chat. Type \"menu\" if you need " +
+        "anything else. Thank you! ☕", { raw: true });
       return;
     }
     // Explicit relay: "/reply <id> <text>"
     const replyCmd = t.match(/^\/reply\s+(\d+)\s+([\s\S]+)/);
     if (replyCmd) {
-      await sendTelegram(replyCmd[1], `👤 CoffeeGo team: ${replyCmd[2]}`);
+      await replyToClient(replyCmd[1], replyCmd[2]);
       const ho = await getHandoff(replyCmd[1]);
       if (ho && ho.lastClientMsg) await addLearned(ho.lastClientMsg, replyCmd[2]);
       await sendTelegram(chatId, "✔️ Sent (saved to the bot's knowledge).");
@@ -143,12 +219,28 @@ app.post("/telegram/webhook", async (req, res) => {
     const ticket = replyText.match(/\[#(\d+)\]/);
     if (ticket) {
       const cid = ticket[1];
-      if (photoId) await sendPhotoToChat(cid, photoId, `👤 CoffeeGo team${msg.caption ? ": " + msg.caption : ""}`);
-      else await sendTelegram(cid, `👤 CoffeeGo team: ${text}`);
+      const ho = await getHandoff(cid);
+      if (photoId && (!ho || ho.channel !== "whatsapp")) {
+        await sendPhotoToChat(cid, photoId, `👤 CoffeeGo team${msg.caption ? ": " + msg.caption : ""}`);
+      } else if (photoId) {
+        // В WhatsApp фото пока не пересылаем — предупреждаем сотрудника,
+        // чтобы он не думал, что клиент его получил.
+        await sendTelegram(chatId,
+          "⚠️ Клиент в WhatsApp — фото туда пока не уходит, опишите словами.");
+        return;
+      } else {
+        await replyToClient(cid, text);
+      }
       // The bot learns: pair the client's last question with the team's answer.
       if (!photoId && t.length >= 3 && !t.startsWith("/")) {
-        const ho = await getHandoff(cid);
         if (ho && ho.lastClientMsg) await addLearned(ho.lastClientMsg, text);
+      }
+      // Первый ответ на обращение — засекаем скорость для отчёта по франшизе.
+      if (ho && ho.openedAt && !ho.firstReplyAt) {
+        ho.firstReplyAt = Date.now();
+        await setHandoff(cid, ho);
+        await logFirstReply(cid, (ho.firstReplyAt - ho.openedAt) / 1000,
+                            ho.region || "telegram");
       }
       await sendTelegram(chatId, "✔️ Sent (saved to the bot's knowledge).");
       return;
@@ -214,8 +306,22 @@ app.post("/whatsapp/webhook", async (req, res) => {
           "номер автомата и что именно случилось.");
         continue;
       }
+      const region = regionOf(m.from);
+      // Клиент уже в живой переписке — не гоняем его через меню заново,
+      // а передаём сообщение тому, кто с ним говорит.
+      const ho = await getHandoff(m.from);
+      if (ho) {
+        if (!ho.lastClientMsg || ho.lastClientMsg !== m.text) {
+          ho.lastClientMsg = m.text;
+          await setHandoff(m.from, ho);
+        }
+        const place = REGION_NAMES[region] || region;
+        await sendTelegram(ho.agentId,
+          `📩 [#${m.from}] ${name} · ${place}: ${m.text}`);
+        continue;
+      }
       await runEngine("whatsapp", m.from, m.text,
-        (t) => sendWhatsApp(m.from, t), name);
+        (t) => sendWhatsApp(m.from, t), name, region);
     }
   } catch (e) {
     console.error("[whatsapp] handler error:", e);
