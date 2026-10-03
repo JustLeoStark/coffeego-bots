@@ -14,7 +14,7 @@ import {
 } from "./telegram.js";
 import {
   requestStaff, getStaffRequest, dropStaffRequest, markDeclined, declinedAt, addLeadWatcher,
-  removeLeadWatcher, listLeadWatchers, isLeadWatcher, setAssignment, getAssignments,
+  removeLeadWatcher, listLeadWatchers, roleMembers, addRoleMember, removeRoleMember,
   addTeamMember, removeTeamMember, listTeam, createInvite, takeInvite,
 } from "./store.js";
 
@@ -24,8 +24,8 @@ const INVITE_TTL_MS = 48 * 60 * 60 * 1000;
 const REPEAT_MS = 60 * 60 * 1000;   // повторный «Старт» в течение часа не дёргает админа
 const DECLINE_QUIET_MS = 7 * 24 * 60 * 60 * 1000;   // отказ помним неделю
 
-// Роли: копия заявок с сайта — сколько угодно человек; ответственный по
-// роли — один на роль, назначение заменяет прежнего
+// Роли: на каждую — сколько угодно человек; админу приходит всё всегда
+// (владелец 03.10.2026: «несколько человек на позицию, и мне обязательно»)
 export const ROLES = {
   leads: "📬 Заявки с сайта",
   sales: "💼 Продажи",
@@ -38,10 +38,8 @@ const isAdmin = (id, admin) => admin && String(id) === String(admin);
 
 async function rolesOf(id) {
   const out = [];
-  if (await isLeadWatcher(id)) out.push("leads");
-  for (const [key, agent] of Object.entries(await getAssignments())) {
-    const role = key.split("@")[0];
-    if (agent && String(agent) === String(id) && ROLES[role] && !out.includes(role)) out.push(role);
+  for (const role of Object.keys(ROLES)) {
+    if ((await roleMembers(role)).includes(String(id))) out.push(role);
   }
   return out;
 }
@@ -109,7 +107,8 @@ async function teamScreen() {
     rows.push([{ text: `${member.name || member.id} · ${label}`.slice(0, 60), data: `tm:m:${member.id}` }]);
   }
   if (!team.length) lines.push("Пока никого. Пригласите сотрудника кнопкой ниже.");
-  lines.push("", "Заявки с сайта и обращения без ответственного приходят вам.");
+  lines.push("", "Вам приходит всё: заявки с сайта и обращения клиентов — " +
+    "кто бы ни был назначен.");
   rows.push([{ text: "➕ Пригласить сотрудника", data: "tm:inv" }]);
   return [lines.join("\n"), rows];
 }
@@ -127,9 +126,8 @@ async function memberScreen(id) {
   const member = team.find((m) => String(m.id) === String(id)) || { id, name: "" };
   const roles = await rolesOf(id);
   const text = `👤 <b>${esc(member.name || id)}</b> (id ${id})\n` +
-    "Нажмите роль, чтобы включить или выключить.\n" +
-    "Продажи, поддержка, инвестиции — один ответственный на роль: " +
-    "назначение заменяет прежнего.";
+    "Нажмите роль, чтобы включить или выключить. На одну роль можно " +
+    "назначить нескольких — получат все; вам приходит всегда.";
   return [text, memberRows(id, roles)];
 }
 
@@ -154,7 +152,7 @@ export async function teamCommand(chatId, t) {
   }
   const unwatch = t.match(/^\/unwatch\s+(-?\d+)/);
   if (unwatch) {
-    await removeLeadWatcher(unwatch[1]);
+    await removeRoleMember("leads", unwatch[1]);
     await sendTelegram(chatId, `✅ ${unwatch[1]} больше не получает заявки с сайта.`);
     return true;
   }
@@ -186,11 +184,7 @@ export async function onTeamButton(cb, admin) {
   if (action === "m") { await show(await memberScreen(id)); await answerCallback(cb.id); return true; }
   if (action === "t" && ROLES[role]) {
     const has = (await rolesOf(id)).includes(role);
-    if (role === "leads") {
-      if (has) await removeLeadWatcher(id); else await addLeadWatcher(id);
-    } else {
-      await setAssignment(role, has ? "" : id);
-    }
+    if (has) await removeRoleMember(role, id); else await addRoleMember(role, id);
     await addTeamMember(id);
     if (!has) {
       await sendTelegram(id, role === "leads"
@@ -230,8 +224,11 @@ export async function onTeamButton(cb, admin) {
   return true;
 }
 
-/** Кому, кроме ответственного и админа, отправить заявку с сайта. */
-export async function leadWatchers(except = []) {
-  const skip = new Set(except.filter(Boolean).map(String));
-  return (await listLeadWatchers()).map((w) => w.id).filter((id) => !skip.has(String(id)));
+/** Кому отправить заявку с сайта: роль «Заявки с сайта»; пока в ней
+ *  никого — продажи; админ — всегда. */
+export async function leadRecipients(admin) {
+  let ids = await roleMembers("leads");
+  if (!ids.length) ids = await roleMembers("sales");
+  if (admin && !ids.includes(String(admin))) ids.push(String(admin));
+  return ids;
 }

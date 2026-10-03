@@ -6,8 +6,7 @@ import { handleMessage } from "./engine.js";
 import { askAI } from "./ai.js";
 import { createLead } from "./bitrix.js";
 import {
-  sendTelegram, sendPhotoToChat, setTelegramWebhook, notifyAdminTelegram,
-  setTelegramCommands,
+  sendTelegram, sendPhotoToChat, setTelegramWebhook, setTelegramCommands,
 } from "./telegram.js";
 import {
   sendWhatsApp, verifyWhatsAppWebhook, parseWhatsAppMessages,
@@ -15,13 +14,17 @@ import {
 } from "./whatsapp.js";
 import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
-  setHandoff, getHandoff, clearHandoff, resolveAgent, addLearned,
+  setHandoff, getHandoff, clearHandoff, resolveAgents, addLearned,
   logTicket, logFirstReply, regionStats,
 } from "./store.js";
 import {
   regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
 } from "./regions.js";
-import { onStart, onTeamButton, teamCommand, leadWatchers } from "./team.js";
+import { onStart, onTeamButton, teamCommand, leadRecipients } from "./team.js";
+
+// Кому переслать сообщение клиента в живой переписке: все назначенные
+// (старые переписки — с одним agentId)
+const agentsOf = (ho) => (ho.agents && ho.agents.length ? ho.agents : [ho.agentId]).filter(Boolean);
 
 const app = express();
 // Сырое тело нужно, чтобы проверить подпись Meta: она считается по байтам
@@ -66,17 +69,17 @@ async function runEngine(channel, userId, text, send, clientName, region) {
   }
 
   if (result.openHandoff) {
-    const agent = await resolveAgent(result.openHandoff.category, region);
-    if (agent) {
+    const agents = await resolveAgents(result.openHandoff.category, region);
+    if (agents.length) {
       await setHandoff(userId, {
-        agentId: agent, category: result.openHandoff.category,
+        agentId: agents[0], agents, category: result.openHandoff.category,
         name: clientName, channel, region: region || null,
         openedAt: Date.now(),
       });
-      await logTicket(region || "telegram", result.openHandoff.category, agent);
+      await logTicket(region || "telegram", result.openHandoff.category, agents[0]);
       const tag = result.lead ? result.lead._tag : "";
       const place = region ? ` · ${REGION_NAMES[region] || region}` : "";
-      await sendTelegram(
+      for (const agent of agents) await sendTelegram(
         agent,
         `🔔 New chat handed to you — ${result.openHandoff.category}${place}\n` +
           `[#${userId}] ${clientName}\n\n` +
@@ -266,8 +269,10 @@ app.post("/telegram/webhook", async (req, res) => {
     if (ho && !RESET.includes(t.toLowerCase())) {
       // Remember the client's last text so we can pair it with the agent's answer (learning).
       if (!photoId && text && text !== "[photo]") { ho.lastClientMsg = text; await setHandoff(chatId, ho); }
-      if (photoId) await sendPhotoToChat(ho.agentId, photoId, `📩 [#${chatId}] ${clientName}${msg.caption ? ": " + msg.caption : ""}`);
-      else await sendTelegram(ho.agentId, `📩 [#${chatId}] ${clientName}: ${text}`);
+      for (const agent of agentsOf(ho)) {
+        if (photoId) await sendPhotoToChat(agent, photoId, `📩 [#${chatId}] ${clientName}${msg.caption ? ": " + msg.caption : ""}`);
+        else await sendTelegram(agent, `📩 [#${chatId}] ${clientName}: ${text}`);
+      }
       return;
     }
     if (ho && RESET.includes(t.toLowerCase())) await clearHandoff(chatId);
@@ -279,8 +284,9 @@ app.post("/telegram/webhook", async (req, res) => {
       if (String(sess.step).startsWith("support") || sess.step === "ai_chat") {
         sess.data = sess.data || {};
         sess.data.photoNote = "Photo attached (forwarded to team)";
-        const support = await resolveAgent("Support / complaint");
-        if (support) await sendPhotoToChat(support, photoId, `📷 [#${chatId}] ${clientName}${msg.caption ? ": " + msg.caption : ""}`);
+        for (const support of await resolveAgents("Support / complaint")) {
+          await sendPhotoToChat(support, photoId, `📷 [#${chatId}] ${clientName}${msg.caption ? ": " + msg.caption : ""}`);
+        }
       }
     }
     await runEngine("telegram", chatId, text, (tx, buttons) => sendTelegram(chatId, tx, buttons), clientName);
@@ -331,7 +337,7 @@ app.post("/whatsapp/webhook", async (req, res) => {
           await setHandoff(m.from, ho);
         }
         const place = REGION_NAMES[region] || region;
-        await sendTelegram(ho.agentId,
+        for (const agent of agentsOf(ho)) await sendTelegram(agent,
           `📩 [#${m.from}] ${name} · ${place}: ${m.text}`);
         continue;
       }
@@ -382,11 +388,10 @@ app.post("/netlify/lead", async (req, res) => {
       isInvest ? "→ Send the 2-page summary + data room link; book a 20-min call." : null,
     ].filter(Boolean);
     const text = lines.join("\n");
-    const agent = await resolveAgent(isInvest ? "Invest" : "Sales / office");
-    if (agent) await sendTelegram(agent, "🔔 " + text);
-    if (String(agent) !== ADMIN) await notifyAdminTelegram(text);
-    // Одобренные получатели заявок с сайта — копию каждому
-    for (const id of await leadWatchers([agent, ADMIN])) await sendTelegram(id, "🔔 " + text);
+    // Инвесторам — роль «Инвестиции», остальным — «Заявки с сайта» (пока в
+    // ней никого — продажи). Админу — всегда, ровно один раз
+    const recipients = isInvest ? await resolveAgents("Invest") : await leadRecipients(ADMIN);
+    for (const id of recipients) await sendTelegram(id, "🔔 " + text);
     if (!isNews) {
       const r = await createLead({ title: `Website: ${d.option || form} — ${d.name || d.company || d.email || "lead"}`, name: d.name, phone: d.phone, email: d.email,
         comments: [d.company && `Company: ${d.company}`, d.people && `People: ${d.people}`, d.message, b.site_url && `Page: ${b.site_url}`].filter(Boolean).join("\n") });

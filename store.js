@@ -104,6 +104,9 @@ export async function addTeamMember(id, name) {
 export async function removeTeamMember(id) {
   await cmd(["SREM", "team", String(id)]);
   await cmd(["SREM", "leadwatch", String(id)]);
+  for (const role of ["leads", "sales", "support", "invest"]) {
+    await cmd(["SREM", `role:${role}`, String(id)]);
+  }
   for (const [role, agent] of Object.entries(await getAssignments())) {
     if (String(agent) === String(id)) await cmd(["SET", `assign:${role}`, ""]);
   }
@@ -111,7 +114,11 @@ export async function removeTeamMember(id) {
 export async function listTeam() {
   const ids = new Set([...(((await cmd(["SMEMBERS", "team"])) || [])),
                        ...(((await cmd(["SMEMBERS", "leadwatch"])) || []))]);
+  for (const role of ["leads", "sales", "support", "invest"]) {
+    for (const id of ((await cmd(["SMEMBERS", `role:${role}`])) || [])) ids.add(String(id));
+  }
   for (const agent of Object.values(await getAssignments())) if (agent) ids.add(String(agent));
+  ids.delete(String(process.env.TELEGRAM_ADMIN_CHAT_ID || ""));   // админ — не участник
   const out = [];
   for (const id of ids) out.push({ id, name: (await cmd(["GET", `sub:${id}`])) || "" });
   return out;
@@ -222,6 +229,59 @@ export async function getLearned(n = 40) {
   const out = [];
   for (const v of arr) { try { out.push(JSON.parse(v)); } catch { /* skip */ } }
   return out;
+}
+
+// ---- Роли — несколько человек на роль (владелец 03.10.2026) ----
+// Было: один ответственный на роль (assign:<роль>) и отдельный список
+// получателей заявок (leadwatch). Теперь роль — множество role:<роль>;
+// старые записи читаются как участники, чтобы ничего не потерять.
+export const TEAM_ROLES = ["leads", "sales", "support", "invest"];
+
+export async function roleMembers(role) {
+  const ids = new Set(((await cmd(["SMEMBERS", `role:${role}`])) || []).map(String));
+  const single = await cmd(["GET", `assign:${role}`]);
+  if (single) ids.add(String(single));
+  if (role === "leads") for (const id of ((await cmd(["SMEMBERS", "leadwatch"])) || [])) ids.add(String(id));
+  return [...ids];
+}
+export async function addRoleMember(role, id) {
+  await cmd(["SADD", `role:${role}`, String(id)]);
+}
+export async function removeRoleMember(role, id) {
+  await cmd(["SREM", `role:${role}`, String(id)]);
+  if (String(await cmd(["GET", `assign:${role}`]) || "") === String(id)) {
+    await cmd(["SET", `assign:${role}`, ""]);
+  }
+  if (role === "leads") await cmd(["SREM", "leadwatch", String(id)]);
+}
+
+function roleOf(category) {
+  const c = (category || "").toLowerCase();
+  if (c.includes("support") || c.includes("complaint") || c.includes("question")) return "support";
+  if (c.includes("invest") || c.includes("partner")) return "invest";
+  if (c.includes("office") || c.includes("developer") || c.includes("building") || c.includes("hand")) return "sales";
+  return "default";
+}
+
+/** Кому идёт обращение: ответственный по региону (если задан командой
+ *  /assign роль@регион), иначе все участники роли, иначе дежурный. Админ —
+ *  всегда: владелец хочет видеть всё (03.10.2026). */
+export async function resolveAgents(category, region) {
+  const role = roleOf(category);
+  const admin = process.env.TELEGRAM_ADMIN_CHAT_ID || "";
+  let agents = [];
+  if (region) {
+    const local = await getAssignment(`${role}@${region}`);
+    if (local) agents = [String(local)];
+  }
+  if (!agents.length && role !== "default") agents = await roleMembers(role);
+  if (!agents.length) {
+    const fallback = await getAssignment(region ? `default@${region}` : "default") ||
+      await getAssignment("default");
+    if (fallback) agents = [String(fallback)];
+  }
+  if (admin && !agents.includes(String(admin))) agents.push(String(admin));
+  return agents;
 }
 
 // Resolve which agent handles a category, using assignments (admin fallback).
