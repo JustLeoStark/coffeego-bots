@@ -99,6 +99,32 @@ export async function sendPhotoToAdmin(fileId, caption) {
   await sendPhotoToChat(ADMIN_CHAT_ID, fileId, caption);
 }
 
+// Меню команд «/» в Telegram. Клиентам — только начать заново; админу —
+// управление командой и заявками. Без этого меню пустое, и команды
+// приходится помнить наизусть (владелец 03.10: «нет меню команды»).
+export async function setTelegramCommands(adminChatId) {
+  if (!TOKEN) return;
+  await call("setMyCommands", {
+    commands: [{ command: "start", description: "Start / Начать" },
+               { command: "menu", description: "Menu / Меню" }],
+  });
+  if (!adminChatId) return;
+  await call("setMyCommands", {
+    scope: { type: "chat", chat_id: Number(adminChatId) },
+    commands: [
+      { command: "team", description: "Команда и кто получает заявки с сайта" },
+      { command: "unwatch", description: "Убрать из получателей заявок: /unwatch id" },
+      { command: "assignments", description: "Кто за что отвечает" },
+      { command: "staff", description: "Все, кто писал боту" },
+      { command: "stats", description: "Обращения по регионам" },
+      { command: "regions", description: "Регионы" },
+      { command: "adminhelp", description: "Все команды админа" },
+      { command: "menu", description: "Меню клиента" },
+    ],
+  });
+  console.log("[telegram] commands menu set");
+}
+
 // Register the webhook URL with Telegram (call once, or use setWebhook manually).
 export async function setTelegramWebhook(publicUrl) {
   if (!TOKEN) return;

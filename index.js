@@ -5,7 +5,10 @@ import express from "express";
 import { handleMessage } from "./engine.js";
 import { askAI } from "./ai.js";
 import { createLead } from "./bitrix.js";
-import { sendTelegram, sendPhotoToChat, setTelegramWebhook, notifyAdminTelegram } from "./telegram.js";
+import {
+  sendTelegram, sendPhotoToChat, setTelegramWebhook, notifyAdminTelegram,
+  setTelegramCommands,
+} from "./telegram.js";
 import {
   sendWhatsApp, verifyWhatsAppWebhook, parseWhatsAppMessages,
   parseWhatsAppStatuses, verifySignature, whatsappConfigured,
@@ -398,6 +401,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`CoffeeGo bot listening on :${PORT}`);
   if (process.env.PUBLIC_URL) await setTelegramWebhook(process.env.PUBLIC_URL);
+  await setTelegramCommands(ADMIN);
 
   // Бесплатный Render усыпляет сервис через 15 минут тишины, а просыпается
   // почти минуту. Telegram повторяет доставку долго и переживёт это, а Meta
