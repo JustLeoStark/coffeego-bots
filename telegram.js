@@ -135,8 +135,6 @@ export async function setTelegramCommands(adminChatId) {
     commands: [
       { command: "team", description: "Команда: роли, пригласить, убрать" },
       { command: "invite", description: "Ссылка-приглашение для сотрудника" },
-      { command: "assignments", description: "Кто за что отвечает" },
-      { command: "staff", description: "Все, кто писал боту" },
       { command: "stats", description: "Обращения по регионам" },
       { command: "regions", description: "Регионы" },
       { command: "adminhelp", description: "Все команды админа" },

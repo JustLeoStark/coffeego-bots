@@ -207,7 +207,7 @@ app.post("/telegram/webhook", async (req, res) => {
         return;
       }
       if (t === "/adminhelp") {
-        await sendTelegram(chatId, "Admin commands:\n/team — команда: роли, пригласить, убрать\n/invite — ссылка-приглашение для сотрудника\n/staff — list subscribers\n/assign <role> <id> — set responsible\n/assignments — show current\n/close <id> — end a client chat\n/teach <question> | <answer> — teach the bot\n\nСотрудники входят по ссылке из /invite (или «➕ Пригласить» в /team), клиенты — по обычной ссылке на бота.");
+        await sendTelegram(chatId, "Admin commands:\n/team — команда: роли, пригласить, убрать\n/invite — ссылка-приглашение для сотрудника\n/close <id> — end a client chat\n/teach <question> | <answer> — teach the bot\n\nСотрудники входят по ссылке из /invite (или «➕ Пригласить» в /team), клиенты — по обычной ссылке на бота.");
         return;
       }
     }
@@ -402,6 +402,13 @@ app.post("/netlify/lead", async (req, res) => {
 
 app.get("/", (_req, res) => res.send("CoffeeGo bot is running."));
 app.get("/health", (_req, res) => res.json({ ok: true }));
+// Какая версия работает: Render кладёт коммит в RENDER_GIT_COMMIT. Нужно,
+// чтобы проверить, подхватил ли он выкладку, — без доступа к Render
+const STARTED = new Date().toISOString();
+app.get("/version", (_req, res) => res.json({
+  commit: (process.env.RENDER_GIT_COMMIT || "unknown").slice(0, 7),
+  started: STARTED,
+}));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
