@@ -67,7 +67,21 @@ https URL it prints as `PUBLIC_URL`.
 4. Add the environment variables from `.env`. Set `PUBLIC_URL` to the Render URL
    (e.g. `https://coffeego-bot.onrender.com`) and redeploy so the Telegram webhook registers.
 
-## 7. Editing the conversation
+## 7. Команда бота: вход по заявке
+
+Сотрудник открывает `https://t.me/CoffeeGoUAE_bot?start=team` и жмёт «Старт».
+Админу (`TELEGRAM_ADMIN_CHAT_ID`) приходит «Просится в команду» с кнопками:
+«📬 Заявки с сайта» (копия каждой заявки — сколько угодно человек),
+«💼 Продажи / 🛠 Поддержка / 💰 Инвестиции — ответственный» (одна на роль,
+назначение заменяет прежнего) и «❌ Отклонить». Пока админ не нажал —
+человек ничего не получает. Клиенты по обычной ссылке попадают в диалог,
+как раньше.
+
+Команды админа: `/team` — кто в команде и кто получает заявки,
+`/unwatch <id>` — убрать из получателей. Хранение — в Upstash Redis
+(`UPSTASH_REDIS_REST_URL/TOKEN`); без него одобрения живут до перезапуска.
+
+## 8. Editing the conversation
 
 The whole script is in `src/engine.js` — plain English strings and a small step machine.
 Change wording, add questions, or add branches there. `SCRIPT.md` describes the current flow.

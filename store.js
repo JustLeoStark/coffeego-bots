@@ -55,6 +55,37 @@ export async function listSubscribers() {
   return out;
 }
 
+// ---- Заявки сотрудников и получатели заявок с сайта ----
+// Владелец 03.10.2026: «как в @CoffeeGoAI_Bot — даю ссылку, человек жмёт
+// Старт, я вижу, кто просится, и ставлю галочку». Заявка хранится, пока
+// её не одобрили или не отклонили.
+export async function requestStaff(id, name) {
+  await cmd(["SET", `staffreq:${id}`, JSON.stringify({ name: name || "", at: Date.now() })]);
+}
+export async function getStaffRequest(id) {
+  const v = await cmd(["GET", `staffreq:${id}`]);
+  if (!v) return null;
+  try { return JSON.parse(v); } catch { return null; }
+}
+export async function dropStaffRequest(id) {
+  await cmd(["DEL", `staffreq:${id}`]);
+}
+// Кто получает копию каждой заявки с сайта — сколько угодно человек,
+// в отличие от ответственного по роли, который один
+export async function addLeadWatcher(id, name) {
+  await cmd(["SADD", "leadwatch", String(id)]);
+  if (name) await cmd(["SET", `sub:${id}`, name]);
+}
+export async function removeLeadWatcher(id) {
+  await cmd(["SREM", "leadwatch", String(id)]);
+}
+export async function listLeadWatchers() {
+  const ids = (await cmd(["SMEMBERS", "leadwatch"])) || [];
+  const out = [];
+  for (const id of ids) out.push({ id, name: (await cmd(["GET", `sub:${id}`])) || "" });
+  return out;
+}
+
 // ---- Assignments (role -> agent chat id) ----
 // Роль может быть с регионом: "support@ru", "sales@uae". Без региона —
 // общая роль на всю сеть, она же запасной вариант.

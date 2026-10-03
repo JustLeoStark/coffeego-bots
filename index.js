@@ -18,6 +18,7 @@ import {
 import {
   regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
 } from "./regions.js";
+import { JOIN_START, askToJoin, onStaffButton, teamCommand, leadWatchers } from "./team.js";
 
 const app = express();
 // Сырое тело нужно, чтобы проверить подпись Meta: она считается по байтам
@@ -92,6 +93,12 @@ async function runEngine(channel, userId, text, send, clientName, region) {
 // ---- Telegram ----
 app.post("/telegram/webhook", async (req, res) => {
   res.sendStatus(200);
+  // Нажатие кнопки — одобрение заявки сотрудника
+  const cb = req.body && req.body.callback_query;
+  if (cb) {
+    try { await onStaffButton(cb, ADMIN); } catch (e) { console.error("[telegram] button error:", e); }
+    return;
+  }
   const msg = req.body && req.body.message;
   if (!msg || !msg.chat) return;
   const chatId = msg.chat.id;
@@ -108,8 +115,12 @@ app.post("/telegram/webhook", async (req, res) => {
     // Utility
     if (t === "/id") { await sendTelegram(chatId, `Your Telegram chat ID: ${chatId}`); return; }
 
+    // Сотрудник просится в команду по ссылке ?start=team — не в клиентский диалог
+    if (t.toLowerCase() === JOIN_START) { await askToJoin(chatId, clientName, ADMIN); return; }
+
     // ----- Admin commands -----
     if (isAdmin(chatId)) {
+      if (await teamCommand(chatId, t)) return;
       if (t === "/staff") {
         const list = await listSubscribers();
         const body = list.length ? list.map((s) => `${s.id} — ${s.name || "?"}`).join("\n") : "No subscribers yet.";
@@ -189,7 +200,7 @@ app.post("/telegram/webhook", async (req, res) => {
         return;
       }
       if (t === "/adminhelp") {
-        await sendTelegram(chatId, "Admin commands:\n/staff — list subscribers\n/assign <role> <id> — set responsible\n/assignments — show current\n/close <id> — end a client chat\n/teach <question> | <answer> — teach the bot");
+        await sendTelegram(chatId, "Admin commands:\n/team — кто в команде и кто получает заявки с сайта\n/unwatch <id> — убрать из получателей заявок\n/staff — list subscribers\n/assign <role> <id> — set responsible\n/assignments — show current\n/close <id> — end a client chat\n/teach <question> | <answer> — teach the bot\n\nПригласить сотрудника: ссылка на бота с ?start=team — он нажмёт Старт, вам придут кнопки.");
         return;
       }
     }
@@ -370,6 +381,8 @@ app.post("/netlify/lead", async (req, res) => {
     const agent = await resolveAgent(isInvest ? "Invest" : "Sales / office");
     if (agent) await sendTelegram(agent, "🔔 " + text);
     if (String(agent) !== ADMIN) await notifyAdminTelegram(text);
+    // Одобренные получатели заявок с сайта — копию каждому
+    for (const id of await leadWatchers([agent, ADMIN])) await sendTelegram(id, "🔔 " + text);
     if (!isNews) {
       const r = await createLead({ title: `Website: ${d.option || form} — ${d.name || d.company || d.email || "lead"}`, name: d.name, phone: d.phone, email: d.email,
         comments: [d.company && `Company: ${d.company}`, d.people && `People: ${d.people}`, d.message, b.site_url && `Page: ${b.site_url}`].filter(Boolean).join("\n") });

@@ -1,7 +1,40 @@
 // Telegram Bot API helpers (send messages, optional admin notify).
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID || "";
-const API = (method) => `https://api.telegram.org/bot${TOKEN}/${method}`;
+// Адрес API можно подменить для локальной проверки без настоящего Telegram
+const BASE = process.env.TELEGRAM_API_BASE || "https://api.telegram.org";
+const API = (method) => `${BASE}/bot${TOKEN}/${method}`;
+
+async function call(method, body) {
+  const res = await fetch(API(method), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) console.error(`[telegram] ${method} failed:`, res.status, await res.text());
+  return res;
+}
+
+// Сообщение с кнопками под ним (inline): rows — [[{text, data}], ...]
+export async function sendInline(chatId, text, rows) {
+  await call("sendMessage", {
+    chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: rows.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data }))) },
+  });
+}
+
+// Поправить сообщение — например, кнопки заявки превратить в «одобрено»
+export async function editMessage(chatId, messageId, text) {
+  await call("editMessageText", {
+    chat_id: chatId, message_id: messageId, text, parse_mode: "HTML",
+    disable_web_page_preview: true,
+  });
+}
+
+// Ответ на нажатие кнопки: без него у человека крутятся часики
+export async function answerCallback(id, text) {
+  await call("answerCallbackQuery", { callback_query_id: id, text: text || "" });
+}
 
 export async function sendTelegram(chatId, text, buttons) {
   const body = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
@@ -73,7 +106,8 @@ export async function setTelegramWebhook(publicUrl) {
   const res = await fetch(API("setWebhook"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url, allowed_updates: ["message"] }),
+    // callback_query — нажатия кнопок: ими одобряются заявки сотрудников
+    body: JSON.stringify({ url, allowed_updates: ["message", "callback_query"] }),
   });
   console.log("[telegram] setWebhook", url, "->", res.status);
 }
