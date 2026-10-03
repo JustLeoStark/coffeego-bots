@@ -86,6 +86,41 @@ export async function listLeadWatchers() {
   return out;
 }
 
+// ---- Команда бота и приглашения ----
+// Сотрудники входят по одноразовой ссылке-приглашению, которую делает
+// админ; клиенты — по обычной ссылке (владелец 03.10.2026)
+export async function addTeamMember(id, name) {
+  await cmd(["SADD", "team", String(id)]);
+  if (name) await cmd(["SET", `sub:${id}`, name]);
+}
+export async function removeTeamMember(id) {
+  await cmd(["SREM", "team", String(id)]);
+  await cmd(["SREM", "leadwatch", String(id)]);
+  for (const [role, agent] of Object.entries(await getAssignments())) {
+    if (String(agent) === String(id)) await cmd(["SET", `assign:${role}`, ""]);
+  }
+}
+export async function listTeam() {
+  const ids = new Set([...(((await cmd(["SMEMBERS", "team"])) || [])),
+                       ...(((await cmd(["SMEMBERS", "leadwatch"])) || []))]);
+  for (const agent of Object.values(await getAssignments())) if (agent) ids.add(String(agent));
+  const out = [];
+  for (const id of ids) out.push({ id, name: (await cmd(["GET", `sub:${id}`])) || "" });
+  return out;
+}
+export async function isLeadWatcher(id) {
+  return ((await cmd(["SMEMBERS", "leadwatch"])) || []).map(String).includes(String(id));
+}
+export async function createInvite(code, by) {
+  await cmd(["SET", `invite:${code}`, JSON.stringify({ by: String(by), at: Date.now() })]);
+}
+export async function takeInvite(code) {
+  const v = await cmd(["GET", `invite:${code}`]);
+  if (!v) return null;
+  await cmd(["DEL", `invite:${code}`]);   // одноразовое
+  try { return JSON.parse(v); } catch { return null; }
+}
+
 // ---- Assignments (role -> agent chat id) ----
 // Роль может быть с регионом: "support@ru", "sales@uae". Без региона —
 // общая роль на всю сеть, она же запасной вариант.

@@ -31,6 +31,27 @@ export async function editMessage(chatId, messageId, text) {
   });
 }
 
+// Имя бота для ссылок-приглашений — один раз спрашиваем у Telegram
+let USERNAME = process.env.TELEGRAM_BOT_USERNAME || "";
+export async function botUsername() {
+  if (USERNAME || !TOKEN) return USERNAME || "CoffeeGoUAE_bot";
+  try {
+    const res = await call("getMe", {});
+    const json = await res.json();
+    USERNAME = (json.result && json.result.username) || "CoffeeGoUAE_bot";
+  } catch { USERNAME = "CoffeeGoUAE_bot"; }
+  return USERNAME;
+}
+
+// Поправить сообщение вместе с кнопками — меню команды листается на месте
+export async function editInline(chatId, messageId, text, rows) {
+  await call("editMessageText", {
+    chat_id: chatId, message_id: messageId, text, parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: rows.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data }))) },
+  });
+}
+
 // Ответ на нажатие кнопки: без него у человека крутятся часики
 export async function answerCallback(id, text) {
   await call("answerCallbackQuery", { callback_query_id: id, text: text || "" });
@@ -112,8 +133,8 @@ export async function setTelegramCommands(adminChatId) {
   await call("setMyCommands", {
     scope: { type: "chat", chat_id: Number(adminChatId) },
     commands: [
-      { command: "team", description: "Команда и кто получает заявки с сайта" },
-      { command: "unwatch", description: "Убрать из получателей заявок: /unwatch id" },
+      { command: "team", description: "Команда: роли, пригласить, убрать" },
+      { command: "invite", description: "Ссылка-приглашение для сотрудника" },
       { command: "assignments", description: "Кто за что отвечает" },
       { command: "staff", description: "Все, кто писал боту" },
       { command: "stats", description: "Обращения по регионам" },

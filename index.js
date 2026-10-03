@@ -21,7 +21,7 @@ import {
 import {
   regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
 } from "./regions.js";
-import { JOIN_START, askToJoin, onStaffButton, teamCommand, leadWatchers } from "./team.js";
+import { onStart, onTeamButton, teamCommand, leadWatchers } from "./team.js";
 
 const app = express();
 // Сырое тело нужно, чтобы проверить подпись Meta: она считается по байтам
@@ -99,7 +99,7 @@ app.post("/telegram/webhook", async (req, res) => {
   // Нажатие кнопки — одобрение заявки сотрудника
   const cb = req.body && req.body.callback_query;
   if (cb) {
-    try { await onStaffButton(cb, ADMIN); } catch (e) { console.error("[telegram] button error:", e); }
+    try { await onTeamButton(cb, ADMIN); } catch (e) { console.error("[telegram] button error:", e); }
     return;
   }
   const msg = req.body && req.body.message;
@@ -118,8 +118,9 @@ app.post("/telegram/webhook", async (req, res) => {
     // Utility
     if (t === "/id") { await sendTelegram(chatId, `Your Telegram chat ID: ${chatId}`); return; }
 
-    // Сотрудник просится в команду по ссылке ?start=team — не в клиентский диалог
-    if (t.toLowerCase() === JOIN_START) { await askToJoin(chatId, clientName, ADMIN); return; }
+    // Сотрудник — по ссылке-приглашению (?start=inv_…) или с заявкой
+    // (?start=team): не в клиентский диалог
+    if (await onStart(chatId, clientName, t, ADMIN)) return;
 
     // ----- Admin commands -----
     if (isAdmin(chatId)) {
@@ -203,7 +204,7 @@ app.post("/telegram/webhook", async (req, res) => {
         return;
       }
       if (t === "/adminhelp") {
-        await sendTelegram(chatId, "Admin commands:\n/team — кто в команде и кто получает заявки с сайта\n/unwatch <id> — убрать из получателей заявок\n/staff — list subscribers\n/assign <role> <id> — set responsible\n/assignments — show current\n/close <id> — end a client chat\n/teach <question> | <answer> — teach the bot\n\nПригласить сотрудника: ссылка на бота с ?start=team — он нажмёт Старт, вам придут кнопки.");
+        await sendTelegram(chatId, "Admin commands:\n/team — команда: роли, пригласить, убрать\n/invite — ссылка-приглашение для сотрудника\n/staff — list subscribers\n/assign <role> <id> — set responsible\n/assignments — show current\n/close <id> — end a client chat\n/teach <question> | <answer> — teach the bot\n\nСотрудники входят по ссылке из /invite (или «➕ Пригласить» в /team), клиенты — по обычной ссылке на бота.");
         return;
       }
     }
