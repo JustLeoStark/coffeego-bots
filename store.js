@@ -70,6 +70,14 @@ export async function getStaffRequest(id) {
 export async function dropStaffRequest(id) {
   await cmd(["DEL", `staffreq:${id}`]);
 }
+// Отказ помним, чтобы отклонённый не стучался снова каждый час
+export async function markDeclined(id) {
+  await cmd(["SET", `staffdeclined:${id}`, String(Date.now())]);
+}
+export async function declinedAt(id) {
+  const v = await cmd(["GET", `staffdeclined:${id}`]);
+  return v ? Number(v) : 0;
+}
 // Кто получает копию каждой заявки с сайта — сколько угодно человек,
 // в отличие от ответственного по роли, который один
 export async function addLeadWatcher(id, name) {

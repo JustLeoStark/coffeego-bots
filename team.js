@@ -13,7 +13,7 @@ import {
   sendTelegram, sendInline, editMessage, editInline, answerCallback, botUsername,
 } from "./telegram.js";
 import {
-  requestStaff, getStaffRequest, dropStaffRequest, addLeadWatcher,
+  requestStaff, getStaffRequest, dropStaffRequest, markDeclined, declinedAt, addLeadWatcher,
   removeLeadWatcher, listLeadWatchers, isLeadWatcher, setAssignment, getAssignments,
   addTeamMember, removeTeamMember, listTeam, createInvite, takeInvite,
 } from "./store.js";
@@ -22,6 +22,7 @@ export const JOIN_START = "/start team";
 const INVITE_PREFIX = "/start inv_";
 const INVITE_TTL_MS = 48 * 60 * 60 * 1000;
 const REPEAT_MS = 60 * 60 * 1000;   // повторный «Старт» в течение часа не дёргает админа
+const DECLINE_QUIET_MS = 7 * 24 * 60 * 60 * 1000;   // отказ помним неделю
 
 // Роли: копия заявок с сайта — сколько угодно человек; ответственный по
 // роли — один на роль, назначение заменяет прежнего
@@ -75,6 +76,10 @@ async function askToJoin(chatId, name, admin) {
   if (!admin) { await sendTelegram(chatId, "Приём сотрудников сейчас не настроен."); return; }
   if (isAdmin(chatId, admin)) {
     await sendTelegram(chatId, "Вы администратор бота — команда и роли: /team.");
+    return;
+  }
+  if (Date.now() - (await declinedAt(chatId)) < DECLINE_QUIET_MS) {
+    await sendTelegram(chatId, "Доступ к команде не одобрен. Если это ошибка — свяжитесь с администратором CoffeeGo.");
     return;
   }
   const previous = await getStaffRequest(chatId);
@@ -210,6 +215,7 @@ export async function onTeamButton(cb, admin) {
     if (!request) { await answerCallback(cb.id, "Эту заявку уже разобрали."); return true; }
     await dropStaffRequest(id);
     if (action === "no") {
+      await markDeclined(id);
       if (messageId) await editMessage(chat, messageId, `❌ ${esc(request.name || id)} — не принят.`);
       await answerCallback(cb.id, "Отклонено");
       return true;
