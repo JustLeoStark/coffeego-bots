@@ -7,7 +7,8 @@ into **Bitrix24** as a lead. When a user asks for a person, it also pings an adm
 ```
 index.js     Express server: Telegram + WhatsApp webhooks
 engine.js    Conversation script (the flow lives here — edit freely)
-bitrix.js    crm.lead.add via inbound webhook
+bitrix.js    crm.lead.add via inbound webhook (BITRIX_ENABLED=0 — off)
+crm.js       Telegram conversation → CoffeeGo CRM (signed, retried)
 telegram.js  Telegram send + admin notify + setWebhook
 whatsapp.js  WhatsApp Cloud API send + webhook verify + parse
 ```
@@ -83,7 +84,37 @@ https URL it prints as `PUBLIC_URL`.
 команда и роли живут до перезапуска. Меню «/» бот прописывает сам при
 старте: клиентам — /start, /menu; админу — команды управления.
 
-## 8. Editing the conversation
+## 8. CoffeeGo CRM — переписка в карточках
+
+С `CRM_URL` и `CRM_INGEST_SECRET` бот пересылает в CRM каждое сообщение
+лички с клиентом и каждый свой ответ ему (`crm.js`): `POST
+CRM_URL/integrations/telegram/ingest`. В CRM переписка появляется в карточке
+лида или клиента одной лентой с WhatsApp; новый собеседник становится лидом
+(источник «Telegram»), телефон из квалификации привязывает разговор к
+клиенту или к лиду с этим номером.
+
+- Подпись: `X-Timestamp` (секунды) и `X-Signature: sha256=<hex>`, где hex —
+  HMAC-SHA256 общим секретом от строки `<X-Timestamp>.<тело>`. CRM отвергает
+  неверную подпись и вызовы старше 5 минут (401).
+- Тело: `{"bot": "<имя бота>", "messages": [{chat_id, message_id, direction:
+  "in"|"out", date, text, author: "scenario"|"ai"|"human", user: {id,
+  username, name}, fields: {name, company, phone, location, category, …},
+  qualified}]}`. Повтор безопасен: CRM узнаёт записанное по (chat_id,
+  message_id, direction).
+- Не тормозит бота: отправка не ждётся, таймаут `CRM_TIMEOUT_MS`; ошибка — в
+  лог и в очередь повторов (Upstash, ключ `crm:retry`, до 500 сообщений),
+  повтор раз в минуту.
+- Не пересылаются: группы, админ, команда и все, у кого есть роль или
+  назначение (`/team`, `/assign`), WhatsApp-переписка бота.
+- `BITRIX_ENABLED=0` выключает Bitrix24: лиды из чата заводит CRM. По
+  умолчанию Bitrix работает как раньше. Заявки с сайта (Netlify) в CRM
+  этим каналом не идут — их пока принимает только Bitrix.
+- Ответ менеджера из CRM уходит клиенту через Bot API тем же токеном — в
+  этот сервис он не попадает, и сотрудники в Telegram его не видят.
+- `GET /version` показывает `crm` и `bitrix` — включены ли (без адресов).
+- Проверки: `npm test` (без сети: CRM — локальный сервер в тесте).
+
+## 9. Editing the conversation
 
 The whole script is in `src/engine.js` — plain English strings and a small step machine.
 Change wording, add questions, or add branches there. `SCRIPT.md` describes the current flow.

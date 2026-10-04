@@ -5,7 +5,16 @@
 
 const WEBHOOK = process.env.BITRIX_WEBHOOK_URL || "";
 
+// Выключатель Bitrix24 на время перехода в CoffeeGo CRM: BITRIX_ENABLED=0 —
+// лиды в Bitrix больше не уходят (лиды из чата бота тогда заводит CRM из
+// пересланной переписки, см. crm.js). По умолчанию — как было.
+export const bitrixEnabled = () => process.env.BITRIX_ENABLED !== "0";
+
 export async function createLead(lead) {
+  if (!bitrixEnabled()) {
+    console.log("[bitrix] выключен (BITRIX_ENABLED=0) — лид не отправлен:", lead.title || "");
+    return { ok: false, skipped: true, error: "disabled" };
+  }
   const fields = {
     TITLE: lead.title || "CoffeeGo bot lead",
     NAME: lead.name || "",

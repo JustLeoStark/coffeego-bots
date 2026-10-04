@@ -71,7 +71,21 @@ export async function sendTelegram(chatId, text, buttons) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) console.error("[telegram] send failed:", res.status, await res.text());
+  return sentMessage(res, "send");
+}
+
+// Что Telegram вернул на отправку: само сообщение (номер, чат, время) —
+// по нему переписка пересылается в CRM. Не ушло — null, причина в лог.
+async function sentMessage(res, what) {
+  const raw = await res.text().catch(() => "");
+  if (!res.ok) {
+    console.error(`[telegram] ${what} failed:`, res.status, raw);
+    return null;
+  }
+  try {
+    const json = JSON.parse(raw);
+    return json && json.ok ? json.result : null;
+  } catch { return null; }
 }
 
 export async function notifyAdminTelegram(text) {
@@ -106,13 +120,13 @@ export async function notifyRole(category, text) {
 
 // Re-send a photo (by Telegram file_id) to a specific chat.
 export async function sendPhotoToChat(chatId, fileId, caption) {
-  if (!chatId || !TOKEN) return;
+  if (!chatId || !TOKEN) return null;
   const res = await fetch(API("sendPhoto"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, photo: fileId, caption: caption || "" }),
   });
-  if (!res.ok) console.error("[telegram] sendPhoto failed:", res.status, await res.text());
+  return sentMessage(res, "sendPhoto");
 }
 
 // Back-compat: photo to the admin chat.

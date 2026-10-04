@@ -4,7 +4,8 @@
 import express from "express";
 import { handleMessage } from "./engine.js";
 import { askAI } from "./ai.js";
-import { createLead } from "./bitrix.js";
+import { createLead, bitrixEnabled } from "./bitrix.js";
+import { crmIncoming, crmOutgoing, crmEnabled, startCrmRetry } from "./crm.js";
 import {
   sendTelegram, sendPhotoToChat, setTelegramWebhook, setTelegramCommands,
 } from "./telegram.js";
@@ -15,7 +16,7 @@ import {
 import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
   setHandoff, getHandoff, clearHandoff, resolveAgents, addLearned,
-  logTicket, logFirstReply, regionStats,
+  logTicket, logFirstReply, regionStats, isTeamMember,
 } from "./store.js";
 import {
   regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
@@ -51,21 +52,39 @@ async function replyToClient(clientId, text, opts = {}) {
   const ho = await getHandoff(clientId);
   const body = opts.raw ? text : `👤 CoffeeGo team: ${text}`;
   if (ho && ho.channel === "whatsapp") await sendWhatsApp(clientId, body);
-  else await sendTelegram(clientId, body);
+  else {
+    const sent = await sendTelegram(clientId, body);
+    // Копия в CRM: ответ сотрудника через бота — тоже история клиента
+    crmOutgoing(clientId, sent, body, opts.author || "human");
+  }
 }
 
 // Run the AI/menu engine and, on completion, open a live handoff to an agent.
 // region — рынок клиента: он решает, кому уйдёт обращение и в какие часы
 // на него ответят. Для Telegram региона нет (номера не видно), там работает
 // общая роль.
-async function runEngine(channel, userId, text, send, clientName, region) {
+// toCrm — ответы бота копируются в CoffeeGo CRM (личка клиента в Telegram).
+async function runEngine(channel, userId, text, send, clientName, region, toCrm = false) {
   const session = getSession(`${channel}:${userId}`);
   const result = await handleMessage(session, text, { askAI });
-  for (const reply of result.replies) await send(reply.text, reply.buttons);
+  // Квалификация закончилась — CRM узнаёт это с первым же ответом бота
+  let qualified = Boolean(result.lead);
+  for (const reply of result.replies) {
+    const sent = await send(reply.text, reply.buttons);
+    if (toCrm) {
+      crmOutgoing(userId, sent, reply.text, reply.by === "ai" ? "ai" : "scenario",
+                  { data: session.data, qualified });
+      qualified = false;
+    }
+  }
 
   if (result.lead) {
     const r = await createLead(result.lead);
-    result.lead._tag = r.ok ? `Bitrix lead #${r.id}` : `lead (Bitrix ${r.error || "not configured"})`;
+    const inCrm = toCrm && crmEnabled();
+    result.lead._tag = r.ok
+      ? `Bitrix lead #${r.id}${inCrm ? " · CoffeeGo CRM" : ""}`
+      : inCrm ? "lead → CoffeeGo CRM"
+        : `lead (Bitrix ${r.error || "not configured"})`;
   }
 
   if (result.openHandoff) {
@@ -124,6 +143,12 @@ app.post("/telegram/webhook", async (req, res) => {
     // Сотрудник — по ссылке-приглашению (?start=inv_…) или с заявкой
     // (?start=team): не в клиентский диалог
     if (await onStart(chatId, clientName, t, ADMIN)) return;
+
+    // Копия в CoffeeGo CRM — только личка клиента: группы, админ и
+    // сотрудники (команда, роли, ответственные) туда не идут
+    const toCrm = crmEnabled() && msg.chat.type === "private" &&
+      !(await isTeamMember(chatId));
+    if (toCrm) crmIncoming(msg, text, getSession(`telegram:${chatId}`).data);
 
     // ----- Admin commands -----
     if (isAdmin(chatId)) {
@@ -221,7 +246,7 @@ app.post("/telegram/webhook", async (req, res) => {
       await sendTelegram(chatId, `✅ Chat with ${cid} closed.`);
       await replyToClient(cid,
         "Our team member has closed this chat. Type \"menu\" if you need " +
-        "anything else. Thank you! ☕", { raw: true });
+        "anything else. Thank you! ☕", { raw: true, author: "scenario" });
       return;
     }
     // Explicit relay: "/reply <id> <text>"
@@ -239,7 +264,9 @@ app.post("/telegram/webhook", async (req, res) => {
       const cid = ticket[1];
       const ho = await getHandoff(cid);
       if (photoId && (!ho || ho.channel !== "whatsapp")) {
-        await sendPhotoToChat(cid, photoId, `👤 CoffeeGo team${msg.caption ? ": " + msg.caption : ""}`);
+        const caption = `👤 CoffeeGo team${msg.caption ? ": " + msg.caption : ""}`;
+        const sent = await sendPhotoToChat(cid, photoId, caption);
+        crmOutgoing(cid, sent, `[photo] ${caption}`, "human");
       } else if (photoId) {
         // В WhatsApp фото пока не пересылаем — предупреждаем сотрудника,
         // чтобы он не думал, что клиент его получил.
@@ -289,7 +316,8 @@ app.post("/telegram/webhook", async (req, res) => {
         }
       }
     }
-    await runEngine("telegram", chatId, text, (tx, buttons) => sendTelegram(chatId, tx, buttons), clientName);
+    await runEngine("telegram", chatId, text, (tx, buttons) => sendTelegram(chatId, tx, buttons),
+                    clientName, undefined, toCrm);
   } catch (e) {
     console.error("[telegram] handler error:", e);
   }
@@ -408,6 +436,9 @@ const STARTED = new Date().toISOString();
 app.get("/version", (_req, res) => res.json({
   commit: (process.env.RENDER_GIT_COMMIT || "unknown").slice(0, 7),
   started: STARTED,
+  // Куда идут лиды — без раскрытия адресов и ключей
+  crm: crmEnabled(),
+  bitrix: bitrixEnabled() && Boolean(process.env.BITRIX_WEBHOOK_URL),
 }));
 
 const PORT = process.env.PORT || 3000;
@@ -415,6 +446,7 @@ app.listen(PORT, async () => {
   console.log(`CoffeeGo bot listening on :${PORT}`);
   if (process.env.PUBLIC_URL) await setTelegramWebhook(process.env.PUBLIC_URL);
   await setTelegramCommands(ADMIN);
+  startCrmRetry();
 
   // Бесплатный Render усыпляет сервис через 15 минут тишины, а просыпается
   // почти минуту. Telegram повторяет доставку долго и переживёт это, а Meta

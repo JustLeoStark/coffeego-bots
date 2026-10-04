@@ -81,6 +81,7 @@ export async function declinedAt(id) {
 // Кто получает копию каждой заявки с сайта — сколько угодно человек,
 // в отличие от ответственного по роли, который один
 export async function addLeadWatcher(id, name) {
+  forgetTeamCache();
   await cmd(["SADD", "leadwatch", String(id)]);
   if (name) await cmd(["SET", `sub:${id}`, name]);
 }
@@ -98,10 +99,12 @@ export async function listLeadWatchers() {
 // Сотрудники входят по одноразовой ссылке-приглашению, которую делает
 // админ; клиенты — по обычной ссылке (владелец 03.10.2026)
 export async function addTeamMember(id, name) {
+  forgetTeamCache();
   await cmd(["SADD", "team", String(id)]);
   if (name) await cmd(["SET", `sub:${id}`, name]);
 }
 export async function removeTeamMember(id) {
+  forgetTeamCache();
   await cmd(["SREM", "team", String(id)]);
   await cmd(["SREM", "leadwatch", String(id)]);
   for (const role of ["leads", "sales", "support", "invest"]) {
@@ -140,6 +143,7 @@ export async function takeInvite(code) {
 // Роль может быть с регионом: "support@ru", "sales@uae". Без региона —
 // общая роль на всю сеть, она же запасной вариант.
 export async function setAssignment(role, agentId) {
+  forgetTeamCache();
   await cmd(["SET", `assign:${role}`, String(agentId)]);
   await cmd(["SADD", "assign:keys", String(role)]);
 }
@@ -245,6 +249,7 @@ export async function roleMembers(role) {
   return [...ids];
 }
 export async function addRoleMember(role, id) {
+  forgetTeamCache();
   await cmd(["SADD", `role:${role}`, String(id)]);
 }
 export async function removeRoleMember(role, id) {
@@ -302,4 +307,40 @@ export async function resolveAgent(category, region) {
     if (v) return v;
   }
   return admin;
+}
+
+// ---- Очередь повторов (пересылка в CRM) ----
+// Список Redis: новые — в хвост, повтор берёт с головы. Длина ограничена:
+// если CRM лежит сутками, старое выбрасывается, а бот не пухнет.
+export async function queuePush(key, value, max = 500) {
+  await cmd(["RPUSH", key, String(value)]);
+  await cmd(["LTRIM", key, String(-max), "-1"]);
+}
+export async function queueRange(key, n) {
+  return (await cmd(["LRANGE", key, "0", String(n - 1)])) || [];
+}
+export async function queueDrop(key, n) {
+  await cmd(["LTRIM", key, String(n), "-1"]);
+}
+
+// ---- Кто из команды (для пересылки в CRM) ----
+// Переписку сотрудников с ботом в CRM не шлём — только клиентов. Состав
+// команды читается из Redis десятком запросов, поэтому помним его минуту.
+let teamCache = { at: 0, ids: new Set() };
+export function forgetTeamCache() { teamCache = { at: 0, ids: new Set() }; }
+export async function isTeamMember(id) {
+  const admin = String(process.env.TELEGRAM_ADMIN_CHAT_ID || "");
+  if (admin && String(id) === admin) return true;
+  if (Date.now() - teamCache.at > 60 * 1000) {
+    const ids = new Set();
+    for (const key of ["team", "leadwatch", ...TEAM_ROLES.map((r) => `role:${r}`)]) {
+      for (const member of ((await cmd(["SMEMBERS", key])) || [])) ids.add(String(member));
+    }
+    for (const agent of Object.values(await getAssignments())) if (agent) ids.add(String(agent));
+    for (const v of ["TELEGRAM_SALES_CHAT_ID", "TELEGRAM_SUPPORT_CHAT_ID", "TELEGRAM_INVEST_CHAT_ID"]) {
+      if (process.env[v]) ids.add(String(process.env[v]));
+    }
+    teamCache = { at: Date.now(), ids };
+  }
+  return teamCache.ids.has(String(id));
 }

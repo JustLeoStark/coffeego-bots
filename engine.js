@@ -30,7 +30,8 @@ function normalize(text) {
   return (text || "").trim().toLowerCase();
 }
 
-// Returns { replies:[{text,buttons?}], lead?, notifyHuman?, reset? }
+// Returns { replies:[{text,buttons?,by?}], lead?, notifyHuman?, reset? }
+// by: "ai" — ответ написал ИИ; без него — сценарий (так их различает CRM)
 // deps.askAI(history, userText) -> { reply, is_complaint, complaint_type, needs_photo, wants_contact }
 export async function handleMessage(session, rawText, deps = {}) {
   const text = (rawText || "").trim();
@@ -118,16 +119,16 @@ export async function handleMessage(session, rawText, deps = {}) {
 
       // 1) If a photo was requested but not yet received, keep waiting for it.
       if (session.data.needPhoto && !session.data.photoNote) {
-        return { replies: [{ text: ai.reply }] };
+        return { replies: [{ text: ai.reply, by: "ai" }] };
       }
       // 2) Once it's a complaint or the user wants a human, collect contact to file a ticket.
       if (ai.wants_contact && !session.data.askedContact) {
         session.data.askedContact = true;
         session.step = "ask_name";
-        return { replies: [{ text: `${ai.reply}\n\nCould I take your name so our team can follow up?` }] };
+        return { replies: [{ text: `${ai.reply}\n\nCould I take your name so our team can follow up?`, by: "ai" }] };
       }
       // 3) Otherwise just keep answering.
-      return { replies: [{ text: ai.reply }] };
+      return { replies: [{ text: ai.reply, by: "ai" }] };
     }
 
     case "office_location": {
