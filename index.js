@@ -486,10 +486,11 @@ app.get("/whatsapp/health", (_req, res) => {
 // Только от Netlify: подпись JWS (X-Webhook-Signature) или запасной ?key=.
 // Без NETLIFY_LEAD_SECRET — отказ всем (аудит 05.10). Ключ в журнал не пишем
 app.post("/netlify/lead", async (req, res) => {
-  if (!netlifyOk(req)) {
-    console.warn("[netlify] заявка без верной подписи — отклонена");
-    return res.sendStatus(401);
-  }
+  // Подпись не сошлась — заявку всё равно показываем команде в Telegram, как
+  // было до 05.10 (владелец не должен терять заявки из-за настройки ключа),
+  // но в CRM и Bitrix не отправляем: там только проверенные.
+  const signed = netlifyOk(req);
+  if (!signed) console.warn("[netlify] подпись не сошлась — заявка только в Telegram, без CRM");
   res.sendStatus(200);
   try {
     const b = req.body || {};
@@ -511,12 +512,12 @@ app.post("/netlify/lead", async (req, res) => {
       page ? `Page: ${page}` : null,
       isInvest ? "→ Send the 2-page summary + data room link; book a 20-min call." : null,
     ].filter(Boolean);
-    const text = lines.join("\n");
+    const text = (signed ? "" : "⚠️ Подпись Netlify не сошлась — проверьте JWS secret token. В CRM не ушло.\n") + lines.join("\n");
     // Инвесторам — роль «Инвестиции», остальным — «Заявки с сайта» (пока в
     // ней никого — продажи). Админу — всегда, ровно один раз
     const recipients = isInvest ? await resolveAgents("Invest") : await leadRecipients(ADMIN);
     for (const id of recipients) await sendTelegram(id, "🔔 " + text);
-    if (!isNews) {
+    if (!isNews && signed) {
       // Лидом в CoffeeGo CRM (владелец 05.10.2026); Bitrix — как раньше
       crmWebLead({
         form, option: d.option, name: d.name, company: d.company, phone: d.phone,

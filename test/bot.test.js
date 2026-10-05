@@ -201,18 +201,18 @@ test("заявка с сайта с подписью JWS Netlify уходит в
   assert.equal(call.body.bot, "CoffeeGoUAE_bot");
 });
 
-test("заявка без подписи, с чужой подписью или подменённым телом — 401", async () => {
+test("заявка без верной подписи — только в Telegram (200), в CRM не уходит", async () => {
   const before = webLeads().length;
-  assert.equal((await netlify(SITE_FORM)).status, 401, "без подписи");
-  assert.equal((await netlify(SITE_FORM, { token: jws("{}") })).status, 401, "хэш другого тела");
-  assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), "guess-secret") })).status, 401);
-  assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), NETLIFY_SECRET, { iss: "evil" }) })).status, 401);
-  assert.equal((await netlify(SITE_FORM, { token: "garbage" })).status, 401);
-  assert.equal((await netlify({ ...SITE_FORM, id: "sub-k" }, { key: NETLIFY_SECRET })).status, 401,
+  assert.equal((await netlify(SITE_FORM)).status, 200, "без подписи");
+  assert.equal((await netlify(SITE_FORM, { token: jws("{}") })).status, 200, "хэш другого тела");
+  assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), "guess-secret") })).status, 200);
+  assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), NETLIFY_SECRET, { iss: "evil" }) })).status, 200);
+  assert.equal((await netlify(SITE_FORM, { token: "garbage" })).status, 200);
+  assert.equal((await netlify({ ...SITE_FORM, id: "sub-k" }, { key: NETLIFY_SECRET })).status, 200,
                "?key= без NETLIFY_ALLOW_KEY=1 не принимается");
   process.env.NETLIFY_ALLOW_KEY = "1";
   try {
-    assert.equal((await netlify(SITE_FORM, { key: "guess" })).status, 401);
+    assert.equal((await netlify(SITE_FORM, { key: "guess" })).status, 200);
     assert.equal((await netlify({ ...SITE_FORM, id: "sub-k" }, { key: NETLIFY_SECRET })).status, 200,
                  "запасной ?key= — только по явному разрешению");
   } finally {
@@ -224,14 +224,14 @@ test("заявка без подписи, с чужой подписью или 
   const saved = process.env.NETLIFY_LEAD_SECRET;
   delete process.env.NETLIFY_LEAD_SECRET;
   try {
-    assert.equal((await netlify(SITE_FORM, { key: "" })).status, 401, "без секрета — отказ всем");
-    assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), "") })).status, 401);
+    assert.equal((await netlify(SITE_FORM, { key: "" })).status, 200, "без секрета — отказ всем");
+    assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), "") })).status, 200);
     // Короткий секрет — приём выключен даже с верной подписью
     process.env.NETLIFY_LEAD_SECRET = "short-secret";
     const raw = JSON.stringify({ ...SITE_FORM, id: "sub-s" });
     assert.equal((await fetch(`${BOT}/netlify/lead`, { method: "POST", body: raw,
       headers: { "Content-Type": "application/json",
-                 "X-Webhook-Signature": jws(raw, "short-secret") } })).status, 401);
+                 "X-Webhook-Signature": jws(raw, "short-secret") } })).status, 200);
   } finally {
     process.env.NETLIFY_LEAD_SECRET = saved;
   }
