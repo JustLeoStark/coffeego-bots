@@ -303,3 +303,31 @@ export async function resolveAgent(category, region) {
   }
   return admin;
 }
+
+// Кто из команды: только им можно писать клиентам через бота (/reply,
+// /close, ответ на [#id]) и учить бота. Раньше эти команды проверки не
+// имели — любой в личке мог писать клиентам от имени CoffeeGo.
+let teamCache = { at: 0, ids: new Set() };
+async function readTeam() {
+  const ids = new Set();
+  for (const key of ["team", "leadwatch", ...TEAM_ROLES.map((r) => `role:${r}`)]) {
+    for (const m of (await cmd(["SMEMBERS", key])) || []) ids.add(String(m));
+  }
+  const keys = ((await cmd(["SMEMBERS", "assign:keys"])) || []).map(String);
+  for (const role of new Set(["support", "sales", "invest", "default", ...keys])) {
+    const agent = await cmd(["GET", `assign:${role}`]);
+    if (agent) ids.add(String(agent));
+  }
+  for (const v of ["TELEGRAM_SALES_CHAT_ID", "TELEGRAM_SUPPORT_CHAT_ID", "TELEGRAM_INVEST_CHAT_ID"]) {
+    if (process.env[v]) ids.add(String(process.env[v]));
+  }
+  return ids;
+}
+export async function isTeamMember(id) {
+  const admin = String(process.env.TELEGRAM_ADMIN_CHAT_ID || "");
+  if (admin && String(id) === admin) return true;
+  if (Date.now() - teamCache.at > 60 * 1000) {
+    teamCache = { at: Date.now(), ids: await readTeam() };
+  }
+  return teamCache.ids.has(String(id));
+}

@@ -14,7 +14,7 @@ import {
 } from "./whatsapp.js";
 import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
-  setHandoff, getHandoff, clearHandoff, resolveAgents, addLearned,
+  setHandoff, getHandoff, clearHandoff, resolveAgents, addLearned, isTeamMember,
   logTicket, logFirstReply, regionStats,
 } from "./store.js";
 import {
@@ -213,8 +213,11 @@ app.post("/telegram/webhook", async (req, res) => {
     }
 
     // ----- Agent -> client relay -----
+    // Только команда: иначе любой мог бы писать клиентам от имени CoffeeGo
+    // и учить бота своим ответам.
+    const isStaff = isAdmin(chatId) || (await isTeamMember(chatId));
     // Close a chat: "/close <id>" or reply "/close" to a [#id] message.
-    const closeMatch = t.match(/^\/close\s+(\d+)/) || (t === "/close" && replyText.match(/\[#(\d+)\]/));
+    const closeMatch = isStaff && (t.match(/^\/close\s+(\d+)/) || (t === "/close" && replyText.match(/\[#(\d+)\]/)));
     if (closeMatch) {
       const cid = closeMatch[1];
       await clearHandoff(cid);
@@ -225,7 +228,7 @@ app.post("/telegram/webhook", async (req, res) => {
       return;
     }
     // Explicit relay: "/reply <id> <text>"
-    const replyCmd = t.match(/^\/reply\s+(\d+)\s+([\s\S]+)/);
+    const replyCmd = isStaff && t.match(/^\/reply\s+(\d+)\s+([\s\S]+)/);
     if (replyCmd) {
       await replyToClient(replyCmd[1], replyCmd[2]);
       const ho = await getHandoff(replyCmd[1]);
@@ -234,7 +237,7 @@ app.post("/telegram/webhook", async (req, res) => {
       return;
     }
     // Reply to a forwarded ticket message that contains [#clientId]
-    const ticket = replyText.match(/\[#(\d+)\]/);
+    const ticket = isStaff && replyText.match(/\[#(\d+)\]/);
     if (ticket) {
       const cid = ticket[1];
       const ho = await getHandoff(cid);
