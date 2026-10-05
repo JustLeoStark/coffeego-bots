@@ -23,18 +23,27 @@ const fromB64url = (part) => {
 
 /** Подпись JWS от Netlify сходится с телом запроса. */
 export function jwsOk(token, rawBody, secret) {
-  if (!token || !secret || !rawBody) return false;
+  return jwsCheck(token, rawBody, secret) === "";
+}
+
+/** Почему подпись не принята ("" — принята). В журнал — только причина,
+ *  без секрета и без тела. */
+export function jwsCheck(token, rawBody, secret) {
+  if (!token) return "нет заголовка X-Webhook-Signature (в Netlify не задан JWS secret token?)";
+  if (!secret) return "нет секрета";
+  if (!rawBody) return "пустое тело или не JSON";
   const parts = String(token).split(".");
-  if (parts.length !== 3) return false;
+  if (parts.length !== 3) return "заголовок подписи не JWT";
   const [head, body, signature] = parts;
   const header = fromB64url(head);
-  if (!header || header.alg !== "HS256") return false;
+  if (!header || header.alg !== "HS256") return `алгоритм ${header && header.alg} вместо HS256`;
   const expected = createHmac("sha256", secret).update(`${head}.${body}`).digest("base64url");
-  if (!same(expected, signature)) return false;
+  if (!same(expected, signature)) return "подпись JWT не сошлась — JWS secret token в Netlify и NETLIFY_LEAD_SECRET на Render разные";
   const claims = fromB64url(body);
-  if (!claims || claims.iss !== "netlify" || typeof claims.sha256 !== "string") return false;
+  if (!claims || claims.iss !== "netlify" || typeof claims.sha256 !== "string") return "в подписи нет iss=netlify или sha256";
   const digest = createHash("sha256").update(rawBody).digest("hex");
-  return same(digest, claims.sha256.toLowerCase());
+  if (!same(digest, claims.sha256.toLowerCase())) return "хэш тела не сошёлся";
+  return "";
 }
 
 export const MIN_SECRET = 32;
@@ -57,7 +66,12 @@ export function netlifyOk(req) {
   }
   const secret = process.env.NETLIFY_LEAD_SECRET;
   const token = req.get("x-webhook-signature");
-  if (token) return jwsOk(token, req.rawBody, secret);
+  if (token) {
+    const why = jwsCheck(token, req.rawBody, secret);
+    if (why) console.warn(`[netlify] подпись не принята: ${why}; content-type=${req.get("content-type")}`);
+    return !why;
+  }
+  console.warn("[netlify] подпись не принята: нет заголовка X-Webhook-Signature (в Netlify не задан JWS secret token?)");
   if (process.env.NETLIFY_ALLOW_KEY !== "1") return false;
   const key = typeof req.query.key === "string" ? req.query.key : "";
   return Boolean(key) && same(key, secret);
