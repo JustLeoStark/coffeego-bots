@@ -68,16 +68,25 @@ async function say(chatId, text) {
 }
 const sentTo = (chatId) => tgCalls.filter((c) => c.method === "sendMessage" && Number(c.body.chat_id) === chatId);
 
-test("Upstash лежит: переписка в CRM не уходит, бот при этом отвечает", async () => {
+test("Upstash лежит: в CRM не уходит, сценарий молчит, сотрудникам — пересылка", async () => {
   await say(70, "/start");
   assert.equal(crmCalls.length, 0, "неизвестно, клиент ли это, — не пересылаем");
-  assert.equal(sentTo(70).length, 1, "клиенту бот отвечает как обычно");
+  assert.equal(sentTo(70).length, 0, "пауза неизвестна — лучше промолчать, чем перебить человека");
+  assert.ok(sentTo(1).some((c) => c.body.text.includes("[#70]") && c.body.text.includes("/start")),
+            "админу — сообщение клиента");
 });
 
 test("Upstash лежит: команды сотрудника не выполняются, админ из env — да", async () => {
   await say(71, "/reply 70 hi from someone");
-  assert.equal(sentTo(70).length, 1, "от «не знаем кого» клиенту ничего");
+  assert.equal(sentTo(70).length, 0, "от «не знаем кого» клиенту ничего");
   await say(1, "/reply 70 hi from admin");
-  assert.equal(sentTo(70).length, 2);
+  assert.equal(sentTo(70).length, 1);
   assert.match(sentTo(70).at(-1).body.text, /hi from admin/);
+});
+
+test("Upstash лежит: очередь CRM не берёт записи из памяти, проход прерван", async () => {
+  const { flushCrmQueue } = await import("../crm.js");
+  const { queueLength } = await import("../store.js");
+  await assert.rejects(queueLength("crm:retry"), "очередь — только в Upstash, сбой — исключение");
+  assert.equal(await flushCrmQueue(), 0, "проход прерван без падения");
 });

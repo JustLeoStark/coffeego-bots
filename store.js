@@ -4,6 +4,7 @@
 const URL = process.env.UPSTASH_REDIS_REST_URL || "";
 const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 const mem = new Map(); // key -> value (string) ; sets stored as Set
+const memExpiry = new Map(); // key -> мгновение (мс), когда ключ исчезает
 
 async function cmd(args) {
   if (!URL || !TOKEN) return memCmd(args);
@@ -12,6 +13,8 @@ async function cmd(args) {
       method: "POST",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify(args),
+      // Upstash завис — не держим обработчик Telegram
+      signal: AbortSignal.timeout(5000),
     });
     const json = await res.json();
     return json.result;
@@ -49,13 +52,24 @@ async function strictCmd(args) {
 
 function memCmd([op, key, a, b, ...rest]) {
   op = op.toUpperCase();
+  if (memExpiry.has(key) && memExpiry.get(key) <= Date.now()) {
+    mem.delete(key);
+    memExpiry.delete(key);
+  }
   if (op === "SET") {
-    // NX — только если ключа нет; срок (EX/PXAT) память не помнит:
-    // где он важен, значение само несёт время
-    if ([b, ...rest].map((x) => String(x || "").toUpperCase()).includes("NX") && mem.has(key)) return null;
+    // NX — только если ключа нет; EX / PX / PXAT — срок жизни ключа
+    const opts = [b, ...rest].map((x) => String(x ?? ""));
+    const upper = opts.map((x) => x.toUpperCase());
+    if (upper.includes("NX") && mem.has(key)) return null;
     mem.set(key, String(a));
+    memExpiry.delete(key);
+    const at = (flag) => { const i = upper.indexOf(flag); return i >= 0 ? Number(opts[i + 1]) : null; };
+    if (at("EX") !== null) memExpiry.set(key, Date.now() + at("EX") * 1000);
+    if (at("PX") !== null) memExpiry.set(key, Date.now() + at("PX"));
+    if (at("PXAT") !== null) memExpiry.set(key, at("PXAT"));
     return "OK";
   }
+  if (op === "DEL") memExpiry.delete(key);
   if (op === "LLEN") { const l = mem.get(key); return Array.isArray(l) ? l.length : 0; }
   if (op === "LPOP") {
     const l = Array.isArray(mem.get(key)) ? mem.get(key) : [];
@@ -126,6 +140,7 @@ export async function addLeadWatcher(id, name) {
   if (name) await cmd(["SET", `sub:${id}`, name]);
 }
 export async function removeLeadWatcher(id) {
+  forgetTeamCache();
   await cmd(["SREM", "leadwatch", String(id)]);
 }
 export async function listLeadWatchers() {
@@ -293,6 +308,7 @@ export async function addRoleMember(role, id) {
   await cmd(["SADD", `role:${role}`, String(id)]);
 }
 export async function removeRoleMember(role, id) {
+  forgetTeamCache();
   await cmd(["SREM", `role:${role}`, String(id)]);
   if (String(await cmd(["GET", `assign:${role}`]) || "") === String(id)) {
     await cmd(["SET", `assign:${role}`, ""]);
@@ -355,21 +371,38 @@ export async function resolveAgent(category, region) {
 // записи уйдут ещё раз (CRM узнаёт повтор). Голову никто, кроме повтора,
 // не трогает: переполненная очередь не обрезается с головы, а не берёт
 // новое — иначе LPOP снял бы не те записи.
+// Только strictCmd: сбой Upstash — исключение, а не память. Иначе
+// посреди прохода LRANGE взял бы записи из памяти, а LPOP снял бы из
+// Redis — другие (аудит 05.10). Проход прерывается до следующей минуты.
 export async function queuePush(key, value, max = 500) {
-  if (Number(await cmd(["LLEN", key])) >= max) return false;
-  await cmd(["RPUSH", key, String(value)]);
+  if (Number(await strictCmd(["LLEN", key])) >= max) return false;
+  await strictCmd(["RPUSH", key, String(value)]);
   return true;
 }
 export async function queueRange(key, n) {
-  return (await cmd(["LRANGE", key, "0", String(n - 1)])) || [];
+  return (await strictCmd(["LRANGE", key, "0", String(n - 1)])) || [];
 }
 export async function queuePop(key, n) {
   if (n <= 0) return [];
-  const out = await cmd(["LPOP", key, String(n)]);
+  const out = await strictCmd(["LPOP", key, String(n)]);
   return Array.isArray(out) ? out : out ? [out] : [];
 }
 export async function queueLength(key) {
-  return Number(await cmd(["LLEN", key])) || 0;
+  return Number(await strictCmd(["LLEN", key])) || 0;
+}
+
+// Замок прохода повтора: во время выкладки на Render два экземпляра бота
+// работают одновременно, и оба разбирали бы одну очередь. Ключ живёт
+// 55 секунд — меньше минуты между проходами. true — замок наш
+export async function lockFlush(token, ms = 55000) {
+  return (await strictCmd(["SET", "crm:flush-lock", token, "NX", "PX", String(ms)])) === "OK";
+}
+export async function unlockFlush(token) {
+  try {
+    if ((await strictCmd(["GET", "crm:flush-lock"])) === token) {
+      await strictCmd(["DEL", "crm:flush-lock"]);
+    }
+  } catch { /* истечёт сам */ }
 }
 
 // ---- Бот молчит: отвечает человек (владелец 05.10.2026) ----
@@ -386,7 +419,8 @@ export async function setPause(chatId, until) {
 // пределах окна подписи отвергается. true — номер новый
 export async function takeNonce(nonce) {
   try {
-    return (await strictCmd(["SET", `nonce:${nonce}`, "1", "NX", "EX", "300"])) === "OK";
+    // 10 минут — вдвое больше окна подписи (±5 минут)
+    return (await strictCmd(["SET", `nonce:${nonce}`, "1", "NX", "EX", "600"])) === "OK";
   } catch (e) {
     console.error("[store] nonce не проверен:", e.message);
     return false;
@@ -398,6 +432,18 @@ export async function clearPause(chatId) {
 export async function pausedUntil(chatId) {
   const v = Number(await cmd(["GET", `pause:${chatId}`]));
   return v > Date.now() ? v : 0;
+}
+/** "paused", "free" или "unknown" — Upstash не ответил (аудит 05.10:
+ *  тогда бот молчит и только пересылает сотрудникам — лучше промолчать,
+ *  чем перебить человека). */
+export async function pauseState(chatId) {
+  try {
+    const v = Number(await strictCmd(["GET", `pause:${chatId}`]));
+    return v > Date.now() ? "paused" : "free";
+  } catch (e) {
+    console.error("[store] пауза не прочитана:", e.message);
+    return "unknown";
+  }
 }
 
 // ---- Кто из команды (для пересылки в CRM) ----

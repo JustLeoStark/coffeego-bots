@@ -8,7 +8,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 
 const SECRET = "webhook-secret-0123456789";
 const CRM_SECRET = "crm-secret-0123456789-0123456789-abc";
-const NETLIFY_SECRET = "netlify-jws-secret-0123456789";
+const NETLIFY_SECRET = "netlify-jws-secret-0123456789-0123456789";
 
 const listen = (handler) => new Promise((resolve) => {
   const server = http.createServer(handler);
@@ -208,9 +208,16 @@ test("заявка без подписи, с чужой подписью или 
   assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), "guess-secret") })).status, 401);
   assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), NETLIFY_SECRET, { iss: "evil" }) })).status, 401);
   assert.equal((await netlify(SITE_FORM, { token: "garbage" })).status, 401);
-  assert.equal((await netlify(SITE_FORM, { key: "guess" })).status, 401);
-  assert.equal((await netlify({ ...SITE_FORM, id: "sub-k" }, { key: NETLIFY_SECRET })).status, 200,
-               "запасной ?key= работает");
+  assert.equal((await netlify({ ...SITE_FORM, id: "sub-k" }, { key: NETLIFY_SECRET })).status, 401,
+               "?key= без NETLIFY_ALLOW_KEY=1 не принимается");
+  process.env.NETLIFY_ALLOW_KEY = "1";
+  try {
+    assert.equal((await netlify(SITE_FORM, { key: "guess" })).status, 401);
+    assert.equal((await netlify({ ...SITE_FORM, id: "sub-k" }, { key: NETLIFY_SECRET })).status, 200,
+                 "запасной ?key= — только по явному разрешению");
+  } finally {
+    delete process.env.NETLIFY_ALLOW_KEY;
+  }
   await settle();
   assert.equal(webLeads().length, before + 1);
 
@@ -219,6 +226,12 @@ test("заявка без подписи, с чужой подписью или 
   try {
     assert.equal((await netlify(SITE_FORM, { key: "" })).status, 401, "без секрета — отказ всем");
     assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), "") })).status, 401);
+    // Короткий секрет — приём выключен даже с верной подписью
+    process.env.NETLIFY_LEAD_SECRET = "short-secret";
+    const raw = JSON.stringify({ ...SITE_FORM, id: "sub-s" });
+    assert.equal((await fetch(`${BOT}/netlify/lead`, { method: "POST", body: raw,
+      headers: { "Content-Type": "application/json",
+                 "X-Webhook-Signature": jws(raw, "short-secret") } })).status, 401);
   } finally {
     process.env.NETLIFY_LEAD_SECRET = saved;
   }
@@ -260,4 +273,32 @@ test("имя и слова клиента уходят сотрудникам п
   await settle();
   const site = sentTo(1).filter((c) => c.body.text.includes("<b>X</b>"));
   assert.ok(site.length && site.every((c) => c.body.parse_mode === undefined));
+});
+
+test("снятый с роли сотрудник сразу перестаёт быть командой", async () => {
+  const { addRoleMember, removeRoleMember, addLeadWatcher, removeLeadWatcher, isTeamMember } =
+    await import("../store.js");
+  await addRoleMember("sales", "880");
+  assert.equal(await isTeamMember("880"), true);
+  await removeRoleMember("sales", "880");
+  assert.equal(await isTeamMember("880"), false, "кэш состава сброшен");
+  await addLeadWatcher("881", "W");
+  assert.equal(await isTeamMember("881"), true);
+  await removeLeadWatcher("881");
+  assert.equal(await isTeamMember("881"), false);
+});
+
+test("nonce handoff живёт 10 минут", async () => {
+  const { takeNonce } = await import("../store.js");
+  const realNow = Date.now;
+  const start = realNow();
+  try {
+    assert.equal(await takeNonce("nonce-ttl-000000000001"), true);
+    Date.now = () => start + 7 * 60 * 1000;
+    assert.equal(await takeNonce("nonce-ttl-000000000001"), false, "через 7 минут — всё ещё повтор");
+    Date.now = () => start + 11 * 60 * 1000;
+    assert.equal(await takeNonce("nonce-ttl-000000000001"), true, "через 11 минут — забыт");
+  } finally {
+    Date.now = realNow;
+  }
 });

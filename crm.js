@@ -22,8 +22,10 @@
 // памяти до перезапуска), повтор раз в минуту. CRM лежит (сеть, 5xx) —
 // запись просто ждёт. CRM отвергла запись (4xx или «error» по записи) —
 // счётчик попыток; после MAX_ATTEMPTS — в crm:dead, разбирать руками.
-import { createHmac, timingSafeEqual } from "node:crypto";
-import { queuePush, queueRange, queuePop, queueLength, takeNonce } from "./store.js";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  queuePush, queueRange, queuePop, queueLength, takeNonce, lockFlush, unlockFlush,
+} from "./store.js";
 import { botUsername } from "./telegram.js";
 
 const QUEUE = "crm:retry";
@@ -128,7 +130,9 @@ async function post(path, body) {
   } catch (e) {
     throw new Transient(`CRM недоступна: ${e.name || e.message}`);
   }
-  if (res.status >= 500 || res.status === 408 || res.status === 429) {
+  // 401/403 — скорее всего секреты меняют по очереди (CRM уже с новым, бот
+  // ещё со старым): запись подождёт, а не сгорит за 5 попыток
+  if (res.status >= 500 || [401, 403, 408, 429].includes(res.status)) {
     throw new Transient(`CRM ответила ${res.status}`);
   }
   if (!res.ok) throw new Error(`CRM ответила ${res.status}`);
@@ -154,14 +158,38 @@ async function sendOne(entry) {
   return accepted(entry.kind, json);
 }
 
+const describe = (entry) => {
+  const item = entry.item || {};
+  return entry.kind === "web"
+    ? `заявка с сайта ${item.submission_id || ""}`.trim()
+    : `сообщение ${item.chat_id}/${item.message_id}/${item.direction}`;
+};
+
 async function enqueue(entry) {
-  const pushed = await queuePush(QUEUE, JSON.stringify(entry), QUEUE_MAX);
-  if (!pushed) console.error("[crm] очередь повторов полна — запись потеряна:", entry.kind);
+  let pushed = false;
+  try {
+    pushed = await queuePush(QUEUE, JSON.stringify(entry), QUEUE_MAX);
+  } catch (e) {
+    console.error(`[crm] Upstash недоступен — ${describe(entry)} потеряно:`, e.message);
+    return;
+  }
+  if (!pushed) console.error(`[crm] очередь повторов полна — ${describe(entry)} потеряно`);
 }
 
 async function bury(entry, why) {
-  console.error(`[crm] запись не принята ${entry.attempts} раз — в ${DEAD}:`, why);
-  await queuePush(DEAD, JSON.stringify({ ...entry, why, at: Date.now() }), DEAD_MAX);
+  console.error(`[crm] ${describe(entry)} не принято (${entry.attempts || 0} отказов, ` +
+                `${entry.tries || 0} без ответа) — в ${DEAD}:`, why);
+  let pushed = false;
+  try {
+    pushed = await queuePush(DEAD, JSON.stringify({ ...entry, why, at: Date.now() }), DEAD_MAX);
+  } catch (e) {
+    console.error(`[crm] Upstash недоступен — ${describe(entry)} потеряно:`, e.message);
+    return;
+  }
+  if (!pushed) {
+    console.error(`[crm] ${DEAD} полон (${DEAD_MAX}) — ${describe(entry)} потеряно; ` +
+                  "разберите crm:dead в Upstash");
+  }
 }
 
 async function failed(entry, why) {
@@ -310,7 +338,11 @@ export async function flushCrmQueue() {
   if (!crmEnabled() || flushing) return 0;
   flushing = true;
   let total = 0;
+  const token = randomBytes(9).toString("hex");
+  let locked = false;
   try {
+    locked = await lockFlush(token);
+    if (!locked) return 0;     // очередь разбирает другой экземпляр бота
     // Каждую запись — не больше раза за проход: вернувшаяся в хвост
     // ждёт следующей минуты, а не сжигает все попытки сразу
     let budget = await queueLength(QUEUE);
@@ -320,7 +352,12 @@ export async function flushCrmQueue() {
       budget -= done;
       if (stop || !done) break;
     }
+  } catch (e) {
+    // Upstash не ответил посреди прохода — бросаем до следующей минуты:
+    // снятое с головы уже доставлено, остальное на месте
+    console.error("[crm] проход очереди прерван:", e.message);
   } finally {
+    if (locked) await unlockFlush(token);
     flushing = false;
   }
   if (total) console.log(`[crm] очередь повторов: разобрано ${total}`);

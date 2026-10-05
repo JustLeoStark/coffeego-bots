@@ -14,7 +14,9 @@ const {
   crmIncoming, crmOutgoing, crmWebLead, flushCrmQueue, sign, leadFields,
   crmCallOk, crmConfigProblem, crmEnabled, MAX_ATTEMPTS, MAX_TRIES,
 } = await import("../crm.js");
-const { queueRange, queueLength } = await import("../store.js");
+const { queueRange, queueLength, queuePush, queuePop, lockFlush, unlockFlush } = await import("../store.js");
+// Очередь общая на файл: тест, которому важен её состав, начинает с пустой
+const emptyQueue = async () => { await queuePop("crm:retry", 10000); };
 
 // Поддельная CRM: status.code — общий ответ; status.perRecord(item) —
 // что CRM скажет про запись ("stored" / "error"); status.reject(item) —
@@ -270,4 +272,58 @@ test("без CRM_URL ничего не уходит и ничего не пад�
   delete process.env.CRM_URL;
   crmIncoming(msgIn(1), "x");
   assert.equal(await flushCrmQueue(), 0);
+});
+
+test("401/403 от CRM — временная ошибка: запись ждёт, а не сгорает", async () => {
+  await emptyQueue();
+  const status = { code: 401 };
+  const { server, calls } = await crmServer(status);
+  crmIncoming(msgIn(100), "rotating secrets");
+  await settle();
+  assert.deepEqual((await queued()).map((e) => [e.item.message_id, e.attempts]), [[100, 0]]);
+  status.code = 403;
+  await flushCrmQueue();
+  assert.deepEqual((await queued()).map((e) => [e.item.message_id, e.attempts, e.tries]), [[100, 0, 1]]);
+  status.code = 200;
+  await flushCrmQueue();
+  assert.equal(await queueLength("crm:retry"), 0);
+  assert.ok(calls.length >= 3);
+  server.close();
+});
+
+test("второй экземпляр бота очередь не трогает, пока замок у первого", async () => {
+  await emptyQueue();
+  const status = { code: 503 };
+  const { server } = await crmServer(status);
+  crmIncoming(msgIn(110), "locked");
+  await settle();
+  status.code = 200;
+  assert.equal(await lockFlush("other-instance"), true);
+  assert.equal(await flushCrmQueue(), 0, "замок чужой — проход пропущен");
+  assert.equal(await queueLength("crm:retry"), 1);
+  await unlockFlush("other-instance");
+  assert.equal(await flushCrmQueue(), 1);
+  assert.equal(await lockFlush("next"), true, "свой замок проход снял");
+  await unlockFlush("next");
+  server.close();
+});
+
+test("переполненный crm:dead — запись в журнал, а не молча", async () => {
+  await emptyQueue();
+  const status = { code: 400 };
+  const { server } = await crmServer(status);
+  for (let i = (await queueLength("crm:dead")); i < 500; i++) await queuePush("crm:dead", "{}", 500);
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => { errors.push(args.join(" ")); };
+  try {
+    crmIncoming(msgIn(120), "x");
+    await settle();
+    for (let i = 1; i < MAX_ATTEMPTS; i++) await flushCrmQueue();
+  } finally {
+    console.error = original;
+  }
+  assert.equal(await queueLength("crm:retry"), 0);
+  assert.ok(errors.some((e) => e.includes("crm:dead полон") && e.includes("120")), errors.join("\n"));
+  server.close();
 });

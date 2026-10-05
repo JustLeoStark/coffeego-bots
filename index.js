@@ -12,7 +12,7 @@ import {
   crmIncoming, crmOutgoing, crmEnabled, startCrmRetry, crmWebLead,
   crmCallOk,
 } from "./crm.js";
-import { netlifyOk } from "./netlify.js";
+import { netlifyOk, netlifyProblem } from "./netlify.js";
 import {
   sendTelegram, sendPhotoToChat, setTelegramWebhook, setTelegramCommands,
   webhookSecret,
@@ -25,7 +25,7 @@ import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
   setHandoff, getHandoff, clearHandoff, resolveAgents, addLearned,
   logTicket, logFirstReply, regionStats, teamStatus,
-  setPause, clearPause, pausedUntil,
+  setPause, clearPause, pauseState,
 } from "./store.js";
 import {
   regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
@@ -352,10 +352,17 @@ app.post("/telegram/webhook", async (req, res) => {
     }
     // Отвечает человек (из CRM или через бота) — бот молчит: сообщение
     // уже в CRM, команде — уведомление, как при запросе человека
-    if (isClient && await pausedUntil(chatId)) {
+    // Пауза неизвестна (Upstash не ответил) — тоже молчим: лучше
+    // промолчать, чем перебить человека. Если не знаем даже, кто пишет, —
+    // как клиенту: команды сотрудника выше уже не выполнились
+    const pause = msg.chat.type === "private" && status !== "staff"
+      ? (status === "unknown" ? "unknown" : await pauseState(chatId)) : "free";
+    if (pause !== "free") {
       const sess = getSession(`telegram:${chatId}`);
       for (const agent of await resolveAgents(sess.data && sess.data.category || "Human hand-off")) {
-        const head = `📩 [#${chatId}] ${clientName} (отвечает человек, бот молчит)`;
+        const head = pause === "paused"
+          ? `📩 [#${chatId}] ${clientName} (отвечает человек, бот молчит)`
+          : `📩 [#${chatId}] ${clientName} (сбой хранилища — бот молчит, ответьте сами)`;
         if (photoId) await sendPhotoToChat(agent, photoId, `${head}${msg.caption ? ": " + msg.caption : ""}`);
         else await sendTelegram(agent, `${head}: ${text}`);
       }
@@ -549,6 +556,7 @@ if (isMain) app.listen(PORT, async () => {
   if (process.env.PUBLIC_URL) await setTelegramWebhook(process.env.PUBLIC_URL);
   await setTelegramCommands(ADMIN);
   startCrmRetry();
+  if (netlifyProblem()) console.error(`[netlify] приём заявок с сайта ВЫКЛЮЧЕН: ${netlifyProblem()}`);
 
   // Бесплатный Render усыпляет сервис через 15 минут тишины, а просыпается
   // почти минуту. Telegram повторяет доставку долго и переживёт это, а Meta

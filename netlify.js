@@ -6,7 +6,9 @@
 // хэш тела запроса. Тот же токен — в NETLIFY_LEAD_SECRET у бота.
 //
 // Запасной способ — ?key=<NETLIFY_LEAD_SECRET> в адресе вебхука (старые
-// настройки). Без NETLIFY_LEAD_SECRET заявки не принимаются вовсе.
+// настройки) — только при явном NETLIFY_ALLOW_KEY=1. Без
+// NETLIFY_LEAD_SECRET или с секретом короче 32 знаков заявки не
+// принимаются вовсе (ошибка в журнале).
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 const same = (a, b) => {
@@ -35,12 +37,28 @@ export function jwsOk(token, rawBody, secret) {
   return same(digest, claims.sha256.toLowerCase());
 }
 
-/** Вызов от Netlify: подпись JWS или (запасное) верный ?key=. */
-export function netlifyOk(req) {
+export const MIN_SECRET = 32;
+
+/** Почему приём заявок выключен; "" — всё в порядке. */
+export function netlifyProblem() {
   const secret = process.env.NETLIFY_LEAD_SECRET || "";
-  if (!secret) return false;
+  if (!secret) return "NETLIFY_LEAD_SECRET не задан";
+  if (secret.length < MIN_SECRET) return `NETLIFY_LEAD_SECRET короче ${MIN_SECRET} знаков`;
+  return "";
+}
+
+/** Вызов от Netlify: подпись JWS или (запасное, если разрешено
+ *  NETLIFY_ALLOW_KEY=1) верный ?key=. */
+export function netlifyOk(req) {
+  const problem = netlifyProblem();
+  if (problem) {
+    console.error(`[netlify] приём заявок ВЫКЛЮЧЕН: ${problem}`);
+    return false;
+  }
+  const secret = process.env.NETLIFY_LEAD_SECRET;
   const token = req.get("x-webhook-signature");
   if (token) return jwsOk(token, req.rawBody, secret);
+  if (process.env.NETLIFY_ALLOW_KEY !== "1") return false;
   const key = typeof req.query.key === "string" ? req.query.key : "";
   return Boolean(key) && same(key, secret);
 }
