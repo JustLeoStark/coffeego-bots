@@ -22,25 +22,40 @@ async function cmd(args) {
 }
 
 // Несколько команд одним запросом (Upstash /pipeline): состав команды
-// читается десятком команд, по запросу на каждую выходило медленно
+// читается десятком команд, по запросу на каждую выходило медленно.
+// Сбой Upstash здесь — исключение, а не память: кто сотрудник, по пустой
+// памяти не решить (аудит 05.10)
 async function pipeline(commands) {
   if (!URL || !TOKEN) return commands.map(memCmd);
-  try {
-    const res = await fetch(`${URL.replace(/\/+$/, "")}/pipeline`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(commands),
-    });
-    const json = await res.json();
-    return json.map((row) => (row ? row.result : null));
-  } catch (e) {
-    console.error("[store] redis pipeline error, using memory:", e.message);
-    return commands.map(memCmd);
-  }
+  const res = await fetch(`${URL.replace(/\/+$/, "")}/pipeline`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(commands),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`Upstash ответил ${res.status}`);
+  const json = await res.json();
+  if (!Array.isArray(json) || json.length !== commands.length) throw new Error("Upstash: странный ответ");
+  return json.map((row) => {
+    if (!row || row.error) throw new Error(`Upstash: ${row ? row.error : "пусто"}`);
+    return row.result;
+  });
 }
 
-function memCmd([op, key, a, b]) {
+// Одна команда, сбой — исключение (без подмены памятью)
+async function strictCmd(args) {
+  return (await pipeline([args]))[0];
+}
+
+function memCmd([op, key, a, b, ...rest]) {
   op = op.toUpperCase();
+  if (op === "SET") {
+    // NX — только если ключа нет; срок (EX/PXAT) память не помнит:
+    // где он важен, значение само несёт время
+    if ([b, ...rest].map((x) => String(x || "").toUpperCase()).includes("NX") && mem.has(key)) return null;
+    mem.set(key, String(a));
+    return "OK";
+  }
   if (op === "LLEN") { const l = mem.get(key); return Array.isArray(l) ? l.length : 0; }
   if (op === "LPOP") {
     const l = Array.isArray(mem.get(key)) ? mem.get(key) : [];
@@ -49,7 +64,6 @@ function memCmd([op, key, a, b]) {
     mem.set(key, l);
     return a === undefined ? (out[0] ?? null) : out;
   }
-  if (op === "SET") { mem.set(key, String(a)); return "OK"; }
   if (op === "GET") { return mem.has(key) ? mem.get(key) : null; }
   if (op === "DEL") { return mem.delete(key) ? 1 : 0; }
   if (op === "SADD") { const s = mem.get(key) instanceof Set ? mem.get(key) : new Set(); s.add(String(a)); mem.set(key, s); return 1; }
@@ -363,7 +377,20 @@ export async function queueLength(key) {
 // ИИ в этом чате молчат до pause:<chat> (сутки с последнего ответа
 // человека). Снимает кнопка «Вернуть бота» в CRM или /close.
 export async function setPause(chatId, until) {
-  await cmd(["SET", `pause:${chatId}`, String(Math.round(until))]);
+  // PXAT — ключ сам исчезнет, когда пауза кончится
+  const at = Math.round(until);
+  await cmd(["SET", `pause:${chatId}`, String(at), "PXAT", String(at)]);
+}
+
+// Одноразовый номер вызова CRM → бот: повтор перехваченного вызова в
+// пределах окна подписи отвергается. true — номер новый
+export async function takeNonce(nonce) {
+  try {
+    return (await strictCmd(["SET", `nonce:${nonce}`, "1", "NX", "EX", "300"])) === "OK";
+  } catch (e) {
+    console.error("[store] nonce не проверен:", e.message);
+    return false;
+  }
 }
 export async function clearPause(chatId) {
   await cmd(["DEL", `pause:${chatId}`]);
@@ -376,6 +403,10 @@ export async function pausedUntil(chatId) {
 // ---- Кто из команды (для пересылки в CRM) ----
 // Переписку сотрудников с ботом в CRM не шлём — только клиентов. Состав —
 // двумя пайплайнами (множества и назначения), помним минуту.
+//
+// Сбой Upstash — «не знаем» (аудит 05.10): переписку такого человека в CRM
+// не пересылаем (лучше пропустить, чем переслать сотрудника как лида), а
+// команды сотрудника не выполняем. Админ из TELEGRAM_ADMIN_CHAT_ID — всегда.
 let teamCache = { at: 0, ids: new Set() };
 export function forgetTeamCache() { teamCache = { at: 0, ids: new Set() }; }
 async function readTeam() {
@@ -397,11 +428,20 @@ async function readTeam() {
   }
   return ids;
 }
-export async function isTeamMember(id) {
+/** "staff" — из команды, "client" — нет, "unknown" — Upstash не ответил. */
+export async function teamStatus(id) {
   const admin = String(process.env.TELEGRAM_ADMIN_CHAT_ID || "");
-  if (admin && String(id) === admin) return true;
+  if (admin && String(id) === admin) return "staff";
   if (Date.now() - teamCache.at > 60 * 1000) {
-    teamCache = { at: Date.now(), ids: await readTeam() };
+    try {
+      teamCache = { at: Date.now(), ids: await readTeam() };
+    } catch (e) {
+      console.error("[store] состав команды не прочитан:", e.message);
+      return "unknown";
+    }
   }
-  return teamCache.ids.has(String(id));
+  return teamCache.ids.has(String(id)) ? "staff" : "client";
+}
+export async function isTeamMember(id) {
+  return (await teamStatus(id)) === "staff";
 }

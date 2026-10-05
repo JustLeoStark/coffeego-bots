@@ -8,8 +8,14 @@
 //    или «верни сценарий» (index.js). Подпись та же.
 //
 // Подпись: X-Signature = "sha256=" + HMAC-SHA256(CRM_INGEST_SECRET,
-// "<X-Timestamp>.<тело>"). Метка времени входит в подпись — вызов старше
-// пяти минут отвергается, перехваченный не повторить.
+// "<назначение>.<X-Timestamp>.<тело>"), назначение — ingest, web-lead или
+// handoff: подпись одного вызова не подходит к другому адресу. Метка
+// времени входит в подпись — вызов старше пяти минут отвергается; у
+// handoff ещё и одноразовый номер (nonce).
+//
+// Пересылка включается, только если CRM_URL — https (http — лишь для
+// localhost в тестах) и секрет не короче 32 знаков. Иначе — ошибка в
+// журнале при старте, бот работает без пересылки.
 //
 // Отправка не должна тормозить и ронять бота: она не ждётся, с таймаутом.
 // Не ушло — в лог и в очередь повторов (Upstash crm:retry, без него — в
@@ -17,7 +23,7 @@
 // запись просто ждёт. CRM отвергла запись (4xx или «error» по записи) —
 // счётчик попыток; после MAX_ATTEMPTS — в crm:dead, разбирать руками.
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { queuePush, queueRange, queuePop, queueLength } from "./store.js";
+import { queuePush, queueRange, queuePop, queueLength, takeNonce } from "./store.js";
 import { botUsername } from "./telegram.js";
 
 const QUEUE = "crm:retry";
@@ -26,7 +32,8 @@ const QUEUE_MAX = 500;
 const DEAD_MAX = 500;
 const BATCH = 50;
 const ROUNDS = 10;              // пачек за один проход повтора
-export const MAX_ATTEMPTS = 5;
+export const MAX_ATTEMPTS = 5;     // CRM отвергла запись (4xx, «error»)
+export const MAX_TRIES = 60;       // CRM не ответила (сеть, 5xx): ~час повторов
 const RETRY_EVERY_MS = 60 * 1000;
 const WINDOW_SEC = 300;
 
@@ -36,22 +43,42 @@ const env = () => ({
   timeout: Number(process.env.CRM_TIMEOUT_MS || 5000),
 });
 
-export const crmEnabled = () => Boolean(env().url && env().secret);
+export const MIN_SECRET = 32;
 
-export function sign(raw, timestamp, secret) {
-  return "sha256=" + createHmac("sha256", secret)
-    .update(`${timestamp}.${raw}`).digest("hex");
+/** Почему пересылка выключена; "" — всё в порядке. */
+export function crmConfigProblem() {
+  const { url, secret } = env();
+  if (!url && !secret) return "CRM_URL и CRM_INGEST_SECRET не заданы";
+  let parsed;
+  try { parsed = new URL(url); } catch { return "CRM_URL — не адрес"; }
+  const local = ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
+  if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:")) {
+    return "CRM_URL должен быть https://";
+  }
+  if (secret.length < MIN_SECRET) return `CRM_INGEST_SECRET короче ${MIN_SECRET} знаков`;
+  return "";
 }
 
-/** Подписал ли вызов CRM (POST /crm/handoff). Без секрета — никому. */
-export function crmSignatureOk(rawBody, timestamp, signature) {
+export const crmEnabled = () => !crmConfigProblem();
+
+export function sign(purpose, raw, timestamp, secret) {
+  return "sha256=" + createHmac("sha256", secret)
+    .update(`${purpose}.${timestamp}.${raw}`).digest("hex");
+}
+
+/** Подписал ли вызов CRM (POST /crm/handoff), не старый ли он и не
+ *  повтор ли (nonce). Пересылка выключена — не верим никому. */
+export async function crmCallOk(purpose, rawBody, timestamp, signature, nonce) {
+  if (!crmEnabled()) return false;
   const { secret } = env();
-  if (!secret || !rawBody || !timestamp || !signature) return false;
+  if (!rawBody || !timestamp || !signature) return false;
   const moment = Number(timestamp);
   if (!Number.isFinite(moment) || Math.abs(Date.now() / 1000 - moment) > WINDOW_SEC) return false;
-  const expected = Buffer.from(sign(rawBody.toString("utf8"), String(timestamp), secret));
+  const expected = Buffer.from(sign(purpose, rawBody.toString("utf8"), String(timestamp), secret));
   const given = Buffer.from(String(signature));
-  return expected.length === given.length && timingSafeEqual(expected, given);
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) return false;
+  if (typeof nonce !== "string" || !/^[A-Za-z0-9_-]{16,64}$/.test(nonce)) return false;
+  return takeNonce(nonce);
 }
 
 // NUL Postgres не хранит — запись в CRM упала бы целиком
@@ -85,6 +112,7 @@ async function post(path, body) {
   const { url, secret, timeout } = env();
   const raw = JSON.stringify({ bot: await botUsername(), ...body });
   const timestamp = String(Math.floor(Date.now() / 1000));
+  const purpose = PURPOSES[path];
   let res;
   try {
     res = await fetch(`${url}${path}`, {
@@ -92,7 +120,7 @@ async function post(path, body) {
       headers: {
         "Content-Type": "application/json",
         "X-Timestamp": timestamp,
-        "X-Signature": sign(raw, timestamp, secret),
+        "X-Signature": sign(purpose, raw, timestamp, secret),
       },
       body: raw,
       signal: AbortSignal.timeout(timeout),
@@ -108,6 +136,7 @@ async function post(path, body) {
 }
 
 const PATHS = { tg: "/integrations/telegram/ingest", web: "/integrations/web-lead" };
+const PURPOSES = { [PATHS.tg]: "ingest", [PATHS.web]: "web-lead" };
 
 // Ответ CRM по одной записи: true — принята (записана, повтор, чужое)
 function accepted(kind, json, index = 0) {
@@ -138,6 +167,14 @@ async function bury(entry, why) {
 async function failed(entry, why) {
   const next = { ...entry, attempts: (entry.attempts || 0) + 1 };
   if (next.attempts >= MAX_ATTEMPTS) await bury(next, why);
+  else await enqueue(next);
+}
+
+// CRM не ответила: попытка «без ответа» и запись в хвост, чтобы не
+// держала остальные; после MAX_TRIES — в «мёртвые» (вечный 5xx)
+async function unanswered(entry, why) {
+  const next = { ...entry, tries: (entry.tries || 0) + 1 };
+  if (next.tries >= MAX_TRIES) await bury(next, why);
   else await enqueue(next);
 }
 
@@ -200,55 +237,70 @@ const parse = (raw) => {
   } catch { return null; }
 };
 
-// Один круг: голова очереди. Ведущие записи переписки — пачкой; не-2xx
-// (кроме «CRM лежит») — по одной. Возвращает, сколько снято; null — CRM
-// лежит, ждём следующей минуты.
+// Один круг: голова очереди. Ведущие записи переписки — пачкой; пачка не
+// принята — по одной. Запись, на которой CRM не ответила (сеть, 5xx),
+// получает попытку «без ответа» и уходит в хвост, круг на ней кончается:
+// вечный 5xx на одной записи не держит очередь, а через MAX_TRIES она в
+// crm:dead. Возвращает
+// { done, stop }: сколько записей с головы снято и пора ли остановиться.
 async function round(limit) {
   const raw = await queueRange(QUEUE, Math.min(BATCH, limit));
-  if (!raw.length) return 0;
+  if (!raw.length) return { done: 0, stop: true };
   const entries = raw.map(parse);
   let lead = 0;
   while (lead < entries.length && entries[lead] && entries[lead].kind === "tg") lead++;
-  const later = [];          // что вернуть в очередь (в хвост) или похоронить
-  let done = 0;              // сколько записей с головы разобрано
+  const later = [];          // [запись, причина, без ответа?]
+  let done = 0;
+  let stop = false;
 
   if (lead > 0) {
     let json = null;
+    let single = false;
     try {
       json = await post(PATHS.tg, { messages: entries.slice(0, lead).map((e) => e.item) });
     } catch (e) {
-      if (e instanceof Transient) return null;
+      // И 4xx, и 5xx на пачку — по одной: вечная ошибка на одной записи
+      // иначе роняла бы каждую пачку с ней и держала остальные
       console.error("[crm] пачка не принята, по одной:", e.message);
+      single = true;
     }
     if (json) {
       entries.slice(0, lead).forEach((entry, i) => {
-        if (!accepted("tg", json, i)) later.push([entry, "CRM: ошибка записи"]);
+        if (!accepted("tg", json, i)) later.push([entry, "CRM: ошибка записи", false]);
       });
       done = lead;
+    } else if (!single) {
+      lead = 0;
     }
   }
   if (done === 0) {
     // По одной: битая запись (или первая — заявка с сайта) не держит
-    // остальные. CRM легла посреди — останавливаемся, остаток ждёт
+    // остальные. CRM не ответила — запись в хвост, остальные ждут минуту
     const upTo = lead > 0 ? lead : 1;
     for (let i = 0; i < upTo; i++) {
       const entry = entries[i];
-      if (!entry) { done++; continue; }      // нечитаемая запись — выкинуть
-      try {
-        if (!(await sendOne(entry))) later.push([entry, "CRM: ошибка записи"]);
-      } catch (e) {
-        if (e instanceof Transient) break;
-        later.push([entry, e.message]);
-      }
       done++;
+      if (!entry) continue;                  // нечитаемая запись — выкинуть
+      try {
+        if (!(await sendOne(entry))) later.push([entry, "CRM: ошибка записи", false]);
+      } catch (e) {
+        if (e instanceof Transient) {
+          later.push([entry, e.message, true]);
+          stop = true;
+          break;
+        }
+        later.push([entry, e.message, false]);
+      }
     }
-    if (done === 0) return null;
   }
   // Сначала — в хвост и в «мёртвые», потом снять голову: упали между —
   // запись уйдёт дважды, а не пропадёт
-  for (const [entry, why] of later) await failed(entry, why);
+  for (const [entry, why, silent] of later) {
+    if (silent) await unanswered(entry, why);
+    else await failed(entry, why);
+  }
   await queuePop(QUEUE, done);
-  return done;
+  return { done, stop };
 }
 
 let flushing = false;
@@ -263,10 +315,10 @@ export async function flushCrmQueue() {
     // ждёт следующей минуты, а не сжигает все попытки сразу
     let budget = await queueLength(QUEUE);
     for (let i = 0; i < ROUNDS && budget > 0; i++) {
-      const n = await round(budget);
-      if (!n) break;
-      total += n;
-      budget -= n;
+      const { done, stop } = await round(budget);
+      total += done;
+      budget -= done;
+      if (stop || !done) break;
     }
   } finally {
     flushing = false;
@@ -276,7 +328,14 @@ export async function flushCrmQueue() {
 }
 
 export function startCrmRetry() {
-  if (!crmEnabled()) return;
+  const problem = crmConfigProblem();
+  if (problem) {
+    // Пустые CRM_URL и секрет — пересылка просто не настроена; иначе это
+    // ошибка настройки, и молчать о ней нельзя
+    const unset = !process.env.CRM_URL && !process.env.CRM_INGEST_SECRET;
+    (unset ? console.log : console.error)(`[crm] пересылка в CRM ВЫКЛЮЧЕНА: ${problem}`);
+    return;
+  }
   const timer = setInterval(() => { flushCrmQueue().catch(() => {}); }, RETRY_EVERY_MS);
   if (timer.unref) timer.unref();
   console.log("[crm] переписка и заявки уходят в CRM:", env().url);

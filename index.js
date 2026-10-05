@@ -10,8 +10,9 @@ import { askAI } from "./ai.js";
 import { createLead, bitrixEnabled } from "./bitrix.js";
 import {
   crmIncoming, crmOutgoing, crmEnabled, startCrmRetry, crmWebLead,
-  crmSignatureOk,
+  crmCallOk,
 } from "./crm.js";
+import { netlifyOk } from "./netlify.js";
 import {
   sendTelegram, sendPhotoToChat, setTelegramWebhook, setTelegramCommands,
   webhookSecret,
@@ -23,7 +24,7 @@ import {
 import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
   setHandoff, getHandoff, clearHandoff, resolveAgents, addLearned,
-  logTicket, logFirstReply, regionStats, isTeamMember,
+  logTicket, logFirstReply, regionStats, teamStatus,
   setPause, clearPause, pausedUntil,
 } from "./store.js";
 import {
@@ -181,7 +182,11 @@ app.post("/telegram/webhook", async (req, res) => {
 
     // Копия в CoffeeGo CRM — только личка клиента: группы, админ и
     // сотрудники (команда, роли, ответственные) туда не идут
-    const isClient = msg.chat.type === "private" && !(await isTeamMember(chatId));
+    // Кто пишет: команда, клиент или «не знаем» (Upstash не ответил).
+    // «Не знаем» — ни в CRM (лучше пропустить, чем переслать сотрудника
+    // как лида), ни команд сотрудника (аудит 05.10); админ из env — всегда
+    const status = isAdmin(chatId) ? "staff" : await teamStatus(chatId);
+    const isClient = msg.chat.type === "private" && status === "client";
     const toCrm = crmEnabled() && isClient;
     if (toCrm) {
       const data = getSession(`telegram:${chatId}`).data;
@@ -278,7 +283,7 @@ app.post("/telegram/webhook", async (req, res) => {
     // ----- Agent -> client relay -----
     // Только команда: иначе любой мог бы писать клиентам от имени CoffeeGo
     // и учить бота своим ответам.
-    const isStaff = isAdmin(chatId) || (await isTeamMember(chatId));
+    const isStaff = isAdmin(chatId) || status === "staff";
     // Close a chat: "/close <id>" or reply "/close" to a [#id] message.
     const closeMatch = isStaff && (t.match(/^\/close\s+(\d+)/) || (t === "/close" && replyText.match(/\[#(\d+)\]/)));
     if (closeMatch) {
@@ -381,10 +386,11 @@ app.post("/telegram/webhook", async (req, res) => {
 // CRM после ответа менеджера из карточки: «молчи до until» (pause) или
 // кнопка «Вернуть бота» (release). Подпись — тот же HMAC, что у пересылки
 app.post("/crm/handoff", async (req, res) => {
-  if (!crmSignatureOk(req.rawBody, req.get("x-timestamp"), req.get("x-signature"))) {
+  const b = req.body || {};
+  if (!(await crmCallOk("handoff", req.rawBody, req.get("x-timestamp"),
+                        req.get("x-signature"), b.nonce))) {
     return res.sendStatus(401);
   }
-  const b = req.body || {};
   const chatId = Number(b.chat_id);
   if (!Number.isSafeInteger(chatId) || chatId <= 0) return res.status(400).json({ ok: false });
   if (b.action === "pause") {
@@ -470,13 +476,17 @@ app.get("/whatsapp/health", (_req, res) => {
 
 // ---- Website leads (Netlify Forms outgoing webhook) ----
 // Netlify posts JSON: { form_name, data: {name,email,phone,company,people,message,option,...}, site_url, created_at }
+// Только от Netlify: подпись JWS (X-Webhook-Signature) или запасной ?key=.
+// Без NETLIFY_LEAD_SECRET — отказ всем (аудит 05.10). Ключ в журнал не пишем
 app.post("/netlify/lead", async (req, res) => {
+  if (!netlifyOk(req)) {
+    console.warn("[netlify] заявка без верной подписи — отклонена");
+    return res.sendStatus(401);
+  }
   res.sendStatus(200);
   try {
     const b = req.body || {};
     const d = b.data || {};
-    const secret = process.env.NETLIFY_LEAD_SECRET;
-    if (secret && req.query.key !== secret) { console.warn("[netlify] bad key"); return; }
     const form = b.form_name || d["form-name"] || "contact";
     const isNews = form === "newsletter";
     const isInvest = form === "investor" || /invest/i.test(d.option || "");

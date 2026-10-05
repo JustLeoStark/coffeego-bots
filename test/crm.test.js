@@ -7,11 +7,12 @@ import { createHmac } from "node:crypto";
 
 delete process.env.TELEGRAM_BOT_TOKEN;
 delete process.env.UPSTASH_REDIS_REST_URL;
-process.env.CRM_INGEST_SECRET = "test-secret";
+const SECRET = "test-secret-0123456789-0123456789-xyz";
+process.env.CRM_INGEST_SECRET = SECRET;
 
 const {
   crmIncoming, crmOutgoing, crmWebLead, flushCrmQueue, sign, leadFields,
-  crmSignatureOk, MAX_ATTEMPTS,
+  crmCallOk, crmConfigProblem, crmEnabled, MAX_ATTEMPTS, MAX_TRIES,
 } = await import("../crm.js");
 const { queueRange, queueLength } = await import("../store.js");
 
@@ -49,20 +50,41 @@ const queued = async () => (await queueRange("crm:retry", 100)).map((v) => JSON.
 const dead = async () => (await queueRange("crm:dead", 100)).map((v) => JSON.parse(v));
 const msgIn = (id, text = "x") => ({ chat: privateChat, message_id: id, date: 1, from: { id: 42 } });
 
-test("подпись — HMAC-SHA256 от «метка.тело» общим секретом", () => {
-  const expected = "sha256=" + createHmac("sha256", "s").update("100.{}").digest("hex");
-  assert.equal(sign("{}", "100", "s"), expected);
+test("подпись — HMAC-SHA256 от «назначение.метка.тело» общим секретом", () => {
+  const expected = "sha256=" + createHmac("sha256", "s").update("ingest.100.{}").digest("hex");
+  assert.equal(sign("ingest", "{}", "100", "s"), expected);
+  assert.notEqual(sign("handoff", "{}", "100", "s"), expected);
 });
 
-test("вызов CRM к боту: подпись, окно времени, мусор в заголовке", () => {
+test("вызов CRM к боту: назначение, окно времени, мусор, повтор nonce", async () => {
+  process.env.CRM_URL = "https://crm.example";
   const raw = Buffer.from('{"chat_id":1}');
   const now = String(Math.floor(Date.now() / 1000));
-  assert.ok(crmSignatureOk(raw, now, sign(raw.toString(), now, "test-secret")));
-  assert.ok(!crmSignatureOk(raw, now, sign(raw.toString(), now, "guess")));
+  const ok = (purpose, secret, stamp = now) => sign(purpose, raw.toString(), stamp, secret);
+  assert.ok(await crmCallOk("handoff", raw, now, ok("handoff", SECRET), "nonce-0000000000001"));
+  assert.ok(!(await crmCallOk("handoff", raw, now, ok("handoff", SECRET), "nonce-0000000000001")),
+            "тот же nonce второй раз — отказ");
+  assert.ok(!(await crmCallOk("handoff", raw, now, ok("ingest", SECRET), "nonce-0000000000002")),
+            "подпись другого назначения не подходит");
+  assert.ok(!(await crmCallOk("handoff", raw, now, ok("handoff", "guess"), "nonce-0000000000003")));
   const old = String(Math.floor(Date.now() / 1000) - 600);
-  assert.ok(!crmSignatureOk(raw, old, sign(raw.toString(), old, "test-secret")));
-  assert.ok(!crmSignatureOk(raw, now, "sha256=ж"));
-  assert.ok(!crmSignatureOk(undefined, now, "x"));
+  assert.ok(!(await crmCallOk("handoff", raw, old, ok("handoff", SECRET, old), "nonce-0000000000004")));
+  assert.ok(!(await crmCallOk("handoff", raw, now, "sha256=ж", "nonce-0000000000005")));
+  assert.ok(!(await crmCallOk("handoff", raw, now, ok("handoff", SECRET), undefined)), "без nonce — отказ");
+  assert.ok(!(await crmCallOk("handoff", undefined, now, "x", "nonce-0000000000006")));
+});
+
+test("пересылка только по https и с секретом от 32 знаков", () => {
+  process.env.CRM_URL = "http://crm.example";
+  assert.match(crmConfigProblem(), /https/);
+  process.env.CRM_URL = "https://crm.example";
+  assert.equal(crmConfigProblem(), "");
+  process.env.CRM_INGEST_SECRET = "short";
+  assert.match(crmConfigProblem(), /32/);
+  assert.equal(crmEnabled(), false);
+  process.env.CRM_INGEST_SECRET = SECRET;
+  process.env.CRM_URL = "http://127.0.0.1:1";
+  assert.equal(crmConfigProblem(), "", "localhost по http — для проверок");
 });
 
 test("входящее и ответ бота уходят подписанными, с полями лида", async () => {
@@ -75,7 +97,7 @@ test("входящее и ответ бота уходят подписанны�
   const call = calls[0];
   assert.equal(call.url, "/integrations/telegram/ingest");
   assert.equal(call.headers["x-signature"],
-               sign(call.raw, call.headers["x-timestamp"], "test-secret"));
+               sign("ingest", call.raw, call.headers["x-timestamp"], SECRET));
   const body = JSON.parse(call.raw);
   assert.equal(body.bot, "CoffeeGoUAE_bot");
   assert.deepEqual(body.messages[0], {
@@ -107,6 +129,8 @@ test("заявка с сайта уходит в /integrations/web-lead", async 
   crmWebLead({ form: "contact", name: "Anna", phone: "+971", email: "", submission_id: "s1" });
   await arrived;
   assert.equal(calls[0].url, "/integrations/web-lead");
+  assert.equal(calls[0].headers["x-signature"],
+               sign("web-lead", calls[0].raw, calls[0].headers["x-timestamp"], SECRET));
   assert.deepEqual(JSON.parse(calls[0].raw).lead,
                    { form: "contact", name: "Anna", phone: "+971", submission_id: "s1" });
   server.close();
@@ -122,7 +146,7 @@ test("группы и неотправленное не пересылаются
   server.close();
 });
 
-test("CRM лежит — запись ждёт без счёта попыток и уходит повтором", async () => {
+test("CRM лежит — запись ждёт (попытки «без ответа», не «отвергнута») и уходит повтором", async () => {
   const status = { code: 503 };
   const { server, calls, next } = await crmServer(status);
   const arrived = next();
@@ -131,8 +155,9 @@ test("CRM лежит — запись ждёт без счёта попыток 
   await settle();
   assert.deepEqual((await queued()).map((e) => [e.item.message_id, e.attempts]), [[9, 0]]);
 
-  assert.equal(await flushCrmQueue(), 0, "CRM всё ещё лежит — очередь цела");
-  assert.deepEqual((await queued()).map((e) => e.attempts), [0]);
+  await flushCrmQueue();
+  assert.deepEqual((await queued()).map((e) => [e.item.message_id, e.attempts, e.tries]), [[9, 0, 1]],
+                   "CRM всё ещё лежит — запись в очереди, попытка без ответа");
 
   status.code = 200;
   assert.equal(await flushCrmQueue(), 1);
@@ -180,6 +205,64 @@ test("ошибка CRM по одной записи пачки — повтор 
   status.perRecord = () => "stored";
   assert.equal(await flushCrmQueue(), 1);
   assert.equal(await queueLength("crm:retry"), 0);
+  server.close();
+});
+
+test("вечный 5xx на одной записи не держит очередь и кончается crm:dead", async () => {
+  // CRM отвечает 500 на любой вызов с записью 80 и принимает остальные
+  const calls = [];
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      const items = JSON.parse(raw).messages || [];
+      calls.push(items.map((m) => m.message_id));
+      const bad = items.some((m) => m.message_id === 80);
+      res.writeHead(bad ? 500 : 200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: !bad, results: items.map(() => "stored") }));
+    });
+  });
+  await new Promise((r) => server.listen(0, r));
+  process.env.CRM_URL = `http://127.0.0.1:${server.address().port}/`;
+  crmIncoming(msgIn(80), "always 500");
+  crmIncoming(msgIn(81), "fine");
+  await settle();
+  assert.deepEqual((await queued()).map((e) => [e.item.message_id, e.tries || 0]), [[80, 0]],
+                   "81 ушла сразу, 80 ждёт");
+  // Повтор: 80 — без ответа, попытка и в хвост
+  await flushCrmQueue();
+  assert.deepEqual((await queued()).map((e) => [e.item.message_id, e.tries]), [[80, 1]]);
+  for (let i = 0; i < MAX_TRIES; i++) await flushCrmQueue();
+  assert.equal(await queueLength("crm:retry"), 0);
+  const last = (await dead()).at(-1);
+  assert.equal(last.item.message_id, 80);
+  assert.equal(last.tries, MAX_TRIES);
+  server.close();
+});
+
+test("голова, на которой CRM не отвечает, уходит в хвост — остальные идут", async () => {
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      const items = JSON.parse(raw).messages || [];
+      const bad = items.some((m) => m.message_id === 90);
+      res.writeHead(bad ? 502 : 200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: !bad, results: items.map(() => "stored") }));
+    });
+  });
+  await new Promise((r) => server.listen(0, r));
+  process.env.CRM_URL = "http://127.0.0.1:1/";     // CRM лежит — всё в очередь
+  crmIncoming(msgIn(90), "head");
+  crmIncoming(msgIn(91), "next");
+  await settle(200);
+  assert.deepEqual((await queued()).map((e) => e.item.message_id), [90, 91]);
+  process.env.CRM_URL = `http://127.0.0.1:${server.address().port}/`;
+  await flushCrmQueue();
+  assert.deepEqual((await queued()).map((e) => [e.item.message_id, e.tries]), [[91, undefined], [90, 1]],
+                   "голова ушла в хвост");
+  await flushCrmQueue();
+  assert.deepEqual((await queued()).map((e) => e.item.message_id), [90], "91 доставлена");
   server.close();
 });
 

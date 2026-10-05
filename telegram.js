@@ -60,8 +60,12 @@ export async function answerCallback(id, text) {
 // buttons — клавиатура под полем ввода: [{label}] или кнопка «поделиться
 // номером» ({label, contact: true}) — Telegram пришлёт номер самого
 // человека, подтверждённый. { remove: true } — убрать клавиатуру.
+// Простой текст, без parse_mode: сюда попадают имя и слова клиента, поля
+// заявки с сайта — разметка в них сломала бы сообщение или подсунула
+// сотруднику чужую ссылку (аудит 05.10). Разметка — только в sendInline
+// и editInline, где всё чужое проходит через esc()
 export async function sendTelegram(chatId, text, buttons) {
-  const body = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
+  const body = { chat_id: chatId, text, disable_web_page_preview: true };
   if (buttons && buttons.remove) {
     body.reply_markup = { remove_keyboard: true };
   } else if (Array.isArray(buttons) && buttons.length) {

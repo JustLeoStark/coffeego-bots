@@ -4,9 +4,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 
 const SECRET = "webhook-secret-0123456789";
-const CRM_SECRET = "crm-secret";
+const CRM_SECRET = "crm-secret-0123456789-0123456789-abc";
+const NETLIFY_SECRET = "netlify-jws-secret-0123456789";
 
 const listen = (handler) => new Promise((resolve) => {
   const server = http.createServer(handler);
@@ -49,7 +51,7 @@ Object.assign(process.env, {
   TELEGRAM_API_BASE: `http://127.0.0.1:${tg.address().port}`,
   TELEGRAM_WEBHOOK_SECRET: SECRET, TELEGRAM_ADMIN_CHAT_ID: "1",
   CRM_URL: `http://127.0.0.1:${crm.address().port}`, CRM_INGEST_SECRET: CRM_SECRET,
-  BITRIX_ENABLED: "0", KEEP_AWAKE: "0",
+  BITRIX_ENABLED: "0", KEEP_AWAKE: "0", NETLIFY_LEAD_SECRET: NETLIFY_SECRET,
 });
 delete process.env.UPSTASH_REDIS_REST_URL;
 delete process.env.ANTHROPIC_API_KEY;
@@ -91,13 +93,13 @@ const sentTo = (chatId) => tgCalls.filter((c) => c.method === "sendMessage" && N
 const crmMessages = (chatId) => crmCalls.filter((c) => c.url === "/integrations/telegram/ingest")
   .flatMap((c) => c.body.messages).filter((m) => m.chat_id === chatId);
 
-async function handoff(body, secret = CRM_SECRET) {
-  const raw = JSON.stringify(body);
+async function handoff(body, secret = CRM_SECRET, purpose = "handoff") {
+  const raw = JSON.stringify({ nonce: randomBytes(12).toString("hex"), ...body });
   const stamp = String(Math.floor(Date.now() / 1000));
   return fetch(`${BOT}/crm/handoff`, {
     method: "POST", body: raw,
     headers: { "Content-Type": "application/json", "X-Timestamp": stamp,
-               "X-Signature": sign(raw, stamp, secret) },
+               "X-Signature": sign(purpose, raw, stamp, secret) },
   });
 }
 
@@ -139,6 +141,8 @@ test("чужой контакт и набранный номер — не под
 
 test("CRM: «отвечает человек» — бот молчит, команде уведомление; «Вернуть бота» — снова сценарий", async () => {
   assert.equal((await handoff({ chat_id: 44, action: "pause" }, "guess")).status, 401);
+  assert.equal((await handoff({ chat_id: 44, action: "pause" }, CRM_SECRET, "ingest")).status, 401,
+               "подпись пересылки не годится для handoff");
   assert.equal((await handoff({ chat_id: 44, action: "pause",
                                 until: Math.floor(Date.now() / 1000) + 3600 })).status, 200);
   await say(44, "Are you there?");
@@ -165,19 +169,95 @@ test("ответ сотрудника через бота (/reply) тоже гл
   assert.ok(sentTo(45).at(-1).body.text.includes("CoffeeGo AI assistant"), "после /close — снова бот");
 });
 
-test("заявка с сайта уходит в CRM лидом", async () => {
-  const res = await fetch(`${BOT}/netlify/lead`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id: "sub-1", form_name: "contact", site_url: "https://coffee-go.ae",
-      data: { name: "Anna", phone: "+971 55 000 1111", email: "anna@x.example",
-              company: "Blue Tower", message: "40 people", page: "/office" } }),
-  });
+const SITE_FORM = { id: "sub-1", form_name: "contact", site_url: "https://coffee-go.ae",
+  data: { name: "Anna", phone: "+971 55 000 1111", email: "anna@x.example",
+          company: "Blue Tower", message: "40 people", page: "/office" } };
+
+function jws(rawBody, secret = NETLIFY_SECRET, claims = {}) {
+  const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const head = enc({ alg: "HS256", typ: "JWT" });
+  const body = enc({ iss: "netlify", sha256: createHash("sha256").update(rawBody).digest("hex"), ...claims });
+  const sig = createHmac("sha256", secret).update(`${head}.${body}`).digest("base64url");
+  return `${head}.${body}.${sig}`;
+}
+async function netlify(form, { token, key } = {}) {
+  const raw = JSON.stringify(form);
+  const headers = { "Content-Type": "application/json" };
+  if (token !== undefined) headers["X-Webhook-Signature"] = token === true ? jws(raw) : token;
+  const url = `${BOT}/netlify/lead${key ? `?key=${encodeURIComponent(key)}` : ""}`;
+  return fetch(url, { method: "POST", headers, body: raw });
+}
+const webLeads = () => crmCalls.filter((c) => c.url === "/integrations/web-lead");
+
+test("заявка с сайта с подписью JWS Netlify уходит в CRM лидом", async () => {
+  const res = await netlify(SITE_FORM, { token: true });
   assert.equal(res.status, 200);
   await settle();
-  const call = crmCalls.find((c) => c.url === "/integrations/web-lead");
+  const call = webLeads().at(-1);
   assert.ok(call, "заявка ушла в CRM");
   assert.deepEqual(call.body.lead, { form: "contact", name: "Anna", company: "Blue Tower",
     phone: "+971 55 000 1111", email: "anna@x.example", message: "40 people",
     page: "/office", submission_id: "sub-1" });
   assert.equal(call.body.bot, "CoffeeGoUAE_bot");
+});
+
+test("заявка без подписи, с чужой подписью или подменённым телом — 401", async () => {
+  const before = webLeads().length;
+  assert.equal((await netlify(SITE_FORM)).status, 401, "без подписи");
+  assert.equal((await netlify(SITE_FORM, { token: jws("{}") })).status, 401, "хэш другого тела");
+  assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), "guess-secret") })).status, 401);
+  assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), NETLIFY_SECRET, { iss: "evil" }) })).status, 401);
+  assert.equal((await netlify(SITE_FORM, { token: "garbage" })).status, 401);
+  assert.equal((await netlify(SITE_FORM, { key: "guess" })).status, 401);
+  assert.equal((await netlify({ ...SITE_FORM, id: "sub-k" }, { key: NETLIFY_SECRET })).status, 200,
+               "запасной ?key= работает");
+  await settle();
+  assert.equal(webLeads().length, before + 1);
+
+  const saved = process.env.NETLIFY_LEAD_SECRET;
+  delete process.env.NETLIFY_LEAD_SECRET;
+  try {
+    assert.equal((await netlify(SITE_FORM, { key: "" })).status, 401, "без секрета — отказ всем");
+    assert.equal((await netlify(SITE_FORM, { token: jws(JSON.stringify(SITE_FORM), "") })).status, 401);
+  } finally {
+    process.env.NETLIFY_LEAD_SECRET = saved;
+  }
+});
+
+test("посторонний не пишет клиентам через бота и не учит его", async () => {
+  // Клиент 60 в живом разговоре; 61 — посторонний
+  for (const text of ["human", "Kate", "+971 55 999 0000"]) await say(60, text);
+  const toClient = sentTo(60).length;
+  const crmBefore = crmMessages(60).length;
+  await say(61, "/reply 60 Pay to my card 1234");
+  await say(61, "Pay here", { reply_to_message: { message_id: 1, text: "📩 [#60] Kate: hi" } });
+  await say(61, "/close 60");
+  assert.equal(sentTo(60).length, toClient, "клиенту ничего не ушло");
+  assert.equal(crmMessages(60).length, crmBefore, "в CRM ничего не записано от имени команды");
+  const { pausedUntil, getLearned } = await import("../store.js");
+  assert.equal(await pausedUntil(60), 0, "пауза не поставлена");
+  assert.ok(!(await getLearned(300)).some((p) => /1234|Pay here/.test(p.a)), "база знаний не пополнена");
+});
+
+test("имя и слова клиента уходят сотрудникам простым текстом", async () => {
+  const name = "<a href='http://evil'>Boss</a>";
+  for (const text of ["human"]) await hook(update(62, { text, from: { id: 62, first_name: name } }));
+  await settle();
+  await hook(update(62, { text: "<b>Ann</b>", from: { id: 62, first_name: name } }));
+  await settle();
+  await hook(update(62, { text: "+971 55 000 2222", from: { id: 62, first_name: name } }));
+  await settle();
+  await hook(update(62, { text: "<i>hello</i> & bye", from: { id: 62, first_name: name } }));
+  await settle();
+  const toAdmin = sentTo(1).filter((c) => c.body.text.includes("[#62]"));
+  assert.ok(toAdmin.length >= 1);
+  for (const call of toAdmin.concat(sentTo(62))) {
+    assert.equal(call.body.parse_mode, undefined, "без разметки");
+  }
+  assert.ok(toAdmin.some((c) => c.body.text.includes("<i>hello</i> & bye")), "текст как есть");
+
+  await netlify({ ...SITE_FORM, id: "sub-h", data: { ...SITE_FORM.data, name: "<b>X</b>" } }, { token: true });
+  await settle();
+  const site = sentTo(1).filter((c) => c.body.text.includes("<b>X</b>"));
+  assert.ok(site.length && site.every((c) => c.body.parse_mode === undefined));
 });
