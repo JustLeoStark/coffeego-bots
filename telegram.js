@@ -57,13 +57,20 @@ export async function answerCallback(id, text) {
   await call("answerCallbackQuery", { callback_query_id: id, text: text || "" });
 }
 
+// buttons — клавиатура под полем ввода: [{label}] или кнопка «поделиться
+// номером» ({label, contact: true}) — Telegram пришлёт номер самого
+// человека, подтверждённый. { remove: true } — убрать клавиатуру.
 export async function sendTelegram(chatId, text, buttons) {
   const body = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
-  if (buttons && buttons.length) {
+  if (buttons && buttons.remove) {
+    body.reply_markup = { remove_keyboard: true };
+  } else if (Array.isArray(buttons) && buttons.length) {
+    const asksContact = buttons.some((b) => b.contact);
     body.reply_markup = {
-      keyboard: buttons.map((b) => [{ text: b.label }]),
+      keyboard: buttons.map((b) => [b.contact
+        ? { text: b.label, request_contact: true } : { text: b.label }]),
       resize_keyboard: true,
-      one_time_keyboard: false,
+      one_time_keyboard: asksContact,
     };
   }
   const res = await fetch(API("sendMessage"), {
@@ -159,14 +166,36 @@ export async function setTelegramCommands(adminChatId) {
 }
 
 // Register the webhook URL with Telegram (call once, or use setWebhook manually).
+// Секрет вебхука (аудит 05.10): Telegram кладёт его в заголовок
+// X-Telegram-Bot-Api-Secret-Token каждого вызова, и бот принимает только
+// такие. Без него любой, кто знает адрес, писал бы от имени админа.
+// Telegram допускает 1–256 знаков A-Z a-z 0-9 _ -
+export function webhookSecret() {
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
+  return /^[A-Za-z0-9_-]{16,256}$/.test(secret) ? secret : "";
+}
+
+// Register the webhook URL with Telegram (call once, or use setWebhook manually).
 export async function setTelegramWebhook(publicUrl) {
   if (!TOKEN) return;
+  const secret = webhookSecret();
+  if (!secret) {
+    // Без секрета вебхук не включаем вовсе и снимаем прежний: принимать
+    // неподписанные вызовы нельзя. Обновления ждут у Telegram (сутки),
+    // пока не зададут TELEGRAM_WEBHOOK_SECRET
+    console.error("[telegram] TELEGRAM_WEBHOOK_SECRET не задан или короче 16 " +
+      "знаков (A-Z a-z 0-9 _ -) — вебхук ОТКЛЮЧЁН, бот не отвечает в Telegram");
+    await call("deleteWebhook", {});
+    return;
+  }
   const url = `${publicUrl.replace(/\/?$/, "")}/telegram/webhook`;
   const res = await fetch(API("setWebhook"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     // callback_query — нажатия кнопок: ими одобряются заявки сотрудников
-    body: JSON.stringify({ url, allowed_updates: ["message", "callback_query"] }),
+    body: JSON.stringify({
+      url, allowed_updates: ["message", "callback_query"], secret_token: secret,
+    }),
   });
   console.log("[telegram] setWebhook", url, "->", res.status);
 }

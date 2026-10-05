@@ -56,6 +56,13 @@ Sends investor-pack link (coffee-go.ae/investing.html), then:
 
 - Name must be ≥2 chars.
 - Phone must contain ≥7 digits, else the bot re-asks.
+- In Telegram the phone is asked with a "📱 Share my phone number" button
+  (`request_contact`). Only the sender's own shared contact counts as verified;
+  a typed number still works but goes to the CRM as unverified.
+- After a person answers the client (from the CRM card or via `/reply`) the
+  script and the AI stay silent in that chat for 24 hours (or until "Bring the
+  bot back" in the CRM / `/close <id>`); client messages go to the CRM and the
+  team chat.
 - Unrecognised menu input re-shows the 4 options.
 
 ## Ideas to extend later

@@ -21,8 +21,34 @@ async function cmd(args) {
   }
 }
 
+// Несколько команд одним запросом (Upstash /pipeline): состав команды
+// читается десятком команд, по запросу на каждую выходило медленно
+async function pipeline(commands) {
+  if (!URL || !TOKEN) return commands.map(memCmd);
+  try {
+    const res = await fetch(`${URL.replace(/\/+$/, "")}/pipeline`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(commands),
+    });
+    const json = await res.json();
+    return json.map((row) => (row ? row.result : null));
+  } catch (e) {
+    console.error("[store] redis pipeline error, using memory:", e.message);
+    return commands.map(memCmd);
+  }
+}
+
 function memCmd([op, key, a, b]) {
   op = op.toUpperCase();
+  if (op === "LLEN") { const l = mem.get(key); return Array.isArray(l) ? l.length : 0; }
+  if (op === "LPOP") {
+    const l = Array.isArray(mem.get(key)) ? mem.get(key) : [];
+    const n = a === undefined ? 1 : Number(a);
+    const out = l.splice(0, n);
+    mem.set(key, l);
+    return a === undefined ? (out[0] ?? null) : out;
+  }
   if (op === "SET") { mem.set(key, String(a)); return "OK"; }
   if (op === "GET") { return mem.has(key) ? mem.get(key) : null; }
   if (op === "DEL") { return mem.delete(key) ? 1 : 0; }
@@ -310,37 +336,72 @@ export async function resolveAgent(category, region) {
 }
 
 // ---- Очередь повторов (пересылка в CRM) ----
-// Список Redis: новые — в хвост, повтор берёт с головы. Длина ограничена:
-// если CRM лежит сутками, старое выбрасывается, а бот не пухнет.
+// Список Redis: новые — в хвост, повтор смотрит голову (LRANGE) и снимает
+// её атомарно LPOP key n только после ответа CRM — упали посередине,
+// записи уйдут ещё раз (CRM узнаёт повтор). Голову никто, кроме повтора,
+// не трогает: переполненная очередь не обрезается с головы, а не берёт
+// новое — иначе LPOP снял бы не те записи.
 export async function queuePush(key, value, max = 500) {
+  if (Number(await cmd(["LLEN", key])) >= max) return false;
   await cmd(["RPUSH", key, String(value)]);
-  await cmd(["LTRIM", key, String(-max), "-1"]);
+  return true;
 }
 export async function queueRange(key, n) {
   return (await cmd(["LRANGE", key, "0", String(n - 1)])) || [];
 }
-export async function queueDrop(key, n) {
-  await cmd(["LTRIM", key, String(n), "-1"]);
+export async function queuePop(key, n) {
+  if (n <= 0) return [];
+  const out = await cmd(["LPOP", key, String(n)]);
+  return Array.isArray(out) ? out : out ? [out] : [];
+}
+export async function queueLength(key) {
+  return Number(await cmd(["LLEN", key])) || 0;
+}
+
+// ---- Бот молчит: отвечает человек (владелец 05.10.2026) ----
+// Менеджер ответил клиенту из CRM или сотрудник через бота — сценарий и
+// ИИ в этом чате молчат до pause:<chat> (сутки с последнего ответа
+// человека). Снимает кнопка «Вернуть бота» в CRM или /close.
+export async function setPause(chatId, until) {
+  await cmd(["SET", `pause:${chatId}`, String(Math.round(until))]);
+}
+export async function clearPause(chatId) {
+  await cmd(["DEL", `pause:${chatId}`]);
+}
+export async function pausedUntil(chatId) {
+  const v = Number(await cmd(["GET", `pause:${chatId}`]));
+  return v > Date.now() ? v : 0;
 }
 
 // ---- Кто из команды (для пересылки в CRM) ----
-// Переписку сотрудников с ботом в CRM не шлём — только клиентов. Состав
-// команды читается из Redis десятком запросов, поэтому помним его минуту.
+// Переписку сотрудников с ботом в CRM не шлём — только клиентов. Состав —
+// двумя пайплайнами (множества и назначения), помним минуту.
 let teamCache = { at: 0, ids: new Set() };
 export function forgetTeamCache() { teamCache = { at: 0, ids: new Set() }; }
+async function readTeam() {
+  const sets = ["team", "leadwatch", ...TEAM_ROLES.map((r) => `role:${r}`)];
+  const base = ["support", "sales", "invest", "default"];
+  const first = await pipeline([
+    ...sets.map((k) => ["SMEMBERS", k]),
+    ["SMEMBERS", "assign:keys"],
+  ]);
+  const ids = new Set();
+  for (const members of first.slice(0, sets.length)) {
+    for (const m of members || []) ids.add(String(m));
+  }
+  const roles = [...new Set([...base, ...((first[sets.length] || []).map(String))])];
+  const agents = await pipeline(roles.map((r) => ["GET", `assign:${r}`]));
+  for (const agent of agents) if (agent) ids.add(String(agent));
+  for (const v of ["TELEGRAM_SALES_CHAT_ID", "TELEGRAM_SUPPORT_CHAT_ID", "TELEGRAM_INVEST_CHAT_ID"]) {
+    if (process.env[v]) ids.add(String(process.env[v]));
+  }
+  return ids;
+}
 export async function isTeamMember(id) {
   const admin = String(process.env.TELEGRAM_ADMIN_CHAT_ID || "");
   if (admin && String(id) === admin) return true;
   if (Date.now() - teamCache.at > 60 * 1000) {
-    const ids = new Set();
-    for (const key of ["team", "leadwatch", ...TEAM_ROLES.map((r) => `role:${r}`)]) {
-      for (const member of ((await cmd(["SMEMBERS", key])) || [])) ids.add(String(member));
-    }
-    for (const agent of Object.values(await getAssignments())) if (agent) ids.add(String(agent));
-    for (const v of ["TELEGRAM_SALES_CHAT_ID", "TELEGRAM_SUPPORT_CHAT_ID", "TELEGRAM_INVEST_CHAT_ID"]) {
-      if (process.env[v]) ids.add(String(process.env[v]));
-    }
-    teamCache = { at: Date.now(), ids };
+    teamCache = { at: Date.now(), ids: await readTeam() };
   }
   return teamCache.ids.has(String(id));
 }

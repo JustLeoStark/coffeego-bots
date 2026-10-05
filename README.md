@@ -24,8 +24,17 @@ whatsapp.js  WhatsApp Cloud API send + webhook verify + parse
 1. In Telegram, open **@BotFather** → `/newbot` → pick a name and username → copy the **token**.
 2. (Optional) To get admin pings: add the bot to a group or DM it, then find the chat id
    (e.g. via `@userinfobot`) and set `TELEGRAM_ADMIN_CHAT_ID`.
-3. Set `TELEGRAM_BOT_TOKEN` and `PUBLIC_URL` in `.env`.
-   On boot the service auto-registers the webhook at `PUBLIC_URL/telegram/webhook`.
+3. Set `TELEGRAM_BOT_TOKEN`, `PUBLIC_URL` and `TELEGRAM_WEBHOOK_SECRET` in `.env`.
+   On boot the service auto-registers the webhook at `PUBLIC_URL/telegram/webhook`
+   with that secret.
+
+   **Секрет вебхука обязателен.** Telegram кладёт его в заголовок
+   `X-Telegram-Bot-Api-Secret-Token` каждого вызова; без него или с чужим бот
+   отвечает 401 и ничего не делает. Без секрета (или короче 16 знаков, только
+   `A-Z a-z 0-9 _ -`) бот при старте **снимает вебхук** и в Telegram не
+   отвечает — в журнале Render ошибка «вебхук ОТКЛЮЧЁН». Задать:
+   `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`, вписать в
+   `TELEGRAM_WEBHOOK_SECRET` и перезапустить — бот сам переподпишет вебхук.
 
 ## 3. Bitrix24 lead hand-off
 
@@ -84,35 +93,58 @@ https URL it prints as `PUBLIC_URL`.
 команда и роли живут до перезапуска. Меню «/» бот прописывает сам при
 старте: клиентам — /start, /menu; админу — команды управления.
 
-## 8. CoffeeGo CRM — переписка в карточках
+## 8. CoffeeGo CRM — переписка, заявки с сайта, «бот молчит»
 
-С `CRM_URL` и `CRM_INGEST_SECRET` бот пересылает в CRM каждое сообщение
-лички с клиентом и каждый свой ответ ему (`crm.js`): `POST
-CRM_URL/integrations/telegram/ingest`. В CRM переписка появляется в карточке
-лида или клиента одной лентой с WhatsApp; новый собеседник становится лидом
-(источник «Telegram»), телефон из квалификации привязывает разговор к
-клиенту или к лиду с этим номером.
+С `CRM_URL` и `CRM_INGEST_SECRET` бот пересылает в CoffeeGo CRM (`crm.js`):
 
-- Подпись: `X-Timestamp` (секунды) и `X-Signature: sha256=<hex>`, где hex —
-  HMAC-SHA256 общим секретом от строки `<X-Timestamp>.<тело>`. CRM отвергает
-  неверную подпись и вызовы старше 5 минут (401).
-- Тело: `{"bot": "<имя бота>", "messages": [{chat_id, message_id, direction:
-  "in"|"out", date, text, author: "scenario"|"ai"|"human", user: {id,
-  username, name}, fields: {name, company, phone, location, category, …},
-  qualified}]}`. Повтор безопасен: CRM узнаёт записанное по (chat_id,
-  message_id, direction).
-- Не тормозит бота: отправка не ждётся, таймаут `CRM_TIMEOUT_MS`; ошибка — в
-  лог и в очередь повторов (Upstash, ключ `crm:retry`, до 500 сообщений),
-  повтор раз в минуту.
-- Не пересылаются: группы, админ, команда и все, у кого есть роль или
-  назначение (`/team`, `/assign`), WhatsApp-переписка бота.
-- `BITRIX_ENABLED=0` выключает Bitrix24: лиды из чата заводит CRM. По
-  умолчанию Bitrix работает как раньше. Заявки с сайта (Netlify) в CRM
-  этим каналом не идут — их пока принимает только Bitrix.
-- Ответ менеджера из CRM уходит клиенту через Bot API тем же токеном — в
-  этот сервис он не попадает, и сотрудники в Telegram его не видят.
-- `GET /version` показывает `crm` и `bitrix` — включены ли (без адресов).
-- Проверки: `npm test` (без сети: CRM — локальный сервер в тесте).
+- каждое сообщение лички с клиентом и каждый свой ответ ему —
+  `POST CRM_URL/integrations/telegram/ingest`. В CRM переписка ложится в
+  карточку лида или клиента одной лентой с WhatsApp; новый собеседник
+  становится лидом «Telegram»;
+- каждую заявку с сайта (Netlify, кроме подписки на новости) —
+  `POST CRM_URL/integrations/web-lead`: лид «Сайт». Bitrix получает её как
+  раньше, пока `BITRIX_ENABLED` не `0`.
+
+Подпись обоих: `X-Timestamp` (секунды) и `X-Signature: sha256=<hex>`, hex —
+HMAC-SHA256 секретом `CRM_INGEST_SECRET` от строки `<X-Timestamp>.<тело>`.
+CRM отвергает неверную подпись и вызовы старше 5 минут (401).
+
+Тело переписки: `{"bot", "messages": [{chat_id, message_id, direction:
+"in"|"out", date, text, author: "scenario"|"ai"|"human", user: {id, username,
+name}, fields: {name, company, phone, phone_verified, location, category, …},
+qualified}]}`. CRM отвечает по каждой записи (`results`) и узнаёт повтор по
+(chat_id, message_id, direction). Заявка: `{"bot", "lead": {form, option, name,
+company, phone, email, people, message, page, submission_id}}`.
+
+**Телефон.** Бот просит номер кнопкой «📱 Share my phone number»
+(`request_contact`). Номер подтверждён (`phone_verified: true`), только если
+Telegram прислал контакт самого пишущего (`contact.user_id === from.id`).
+Набранный текстом или чужой контакт — `phone_verified: false`: CRM не
+привяжет по нему разговор к клиенту или чужому лиду.
+
+**Очередь повторов.** Отправка не ждётся, таймаут `CRM_TIMEOUT_MS`. Не ушло —
+в Upstash `crm:retry` (до 500), повтор раз в минуту: голова очереди пачкой,
+снимается `LPOP` только после ответа CRM. CRM лежит (сеть, 5xx, 429) — запись
+ждёт без счёта попыток. CRM отвергла пачку (4xx) — по одной; запись, которую
+CRM не приняла 5 раз, уходит в `crm:dead` (до 500) — смотреть в Upstash
+руками.
+
+**Бот молчит, когда отвечает человек** (владелец 05.10.2026). Менеджер
+ответил клиенту из карточки CRM — CRM зовёт `POST /crm/handoff` (та же
+подпись) `{"chat_id", "action": "pause", "until"}`; сотрудник ответил через
+бота (`/reply`, ответ на `[#id]`, фото) — бот ставит паузу сам. В паузе
+сценарий и ИИ в этом чате не отвечают (и `/start` тоже): сообщения клиента
+уходят в CRM и командному чату с пометкой «отвечает человек, бот молчит».
+Пауза — сутки с последнего ответа человека (не больше недели), снимается
+кнопкой «Вернуть бота» в CRM (`"action": "release"`) или `/close <id>`.
+
+Не пересылаются: группы, админ, команда и все, у кого есть роль или
+назначение (`/team`, `/assign`; состав читается одним пайплайном Upstash и
+помнится минуту), WhatsApp-переписка бота.
+
+`GET /version` показывает `crm`, `bitrix` и `telegram_webhook_secret` —
+включены ли (без адресов и ключей). Проверки: `npm test` — без сети:
+Telegram и CRM — локальные серверы в тесте.
 
 ## 9. Editing the conversation
 

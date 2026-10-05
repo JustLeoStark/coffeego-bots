@@ -26,11 +26,18 @@ function welcome() {
   };
 }
 
+// Телефон — кнопкой Telegram: так он точно самого человека (аудит 05.10:
+// набранный текстом номер может быть чужим, и CRM не привяжет по нему
+// разговор к клиенту). Набрать вручную можно по-прежнему
+const SHARE_PHONE = [{ label: "📱 Share my phone number", contact: true }];
+const NO_KEYBOARD = { remove: true };
+
 function normalize(text) {
   return (text || "").trim().toLowerCase();
 }
 
 // Returns { replies:[{text,buttons?,by?}], lead?, notifyHuman?, reset? }
+// deps.phoneVerified — номер пришёл кнопкой «поделиться» от самого человека
 // by: "ai" — ответ написал ИИ; без него — сценарий (так их различает CRM)
 // deps.askAI(history, userText) -> { reply, is_complaint, complaint_type, needs_photo, wants_contact }
 export async function handleMessage(session, rawText, deps = {}) {
@@ -158,14 +165,19 @@ export async function handleMessage(session, rawText, deps = {}) {
       if (text.length < 2) return { replies: [{ text: "Please share your name so we can address you properly." }] };
       session.data.name = text;
       session.step = "ask_phone";
-      return { replies: [{ text: `Thanks, ${text}! What's the best phone number (WhatsApp preferred) to reach you?` }] };
+      return { replies: [{
+        text: `Thanks, ${text}! What's the best phone number (WhatsApp preferred) to reach you? ` +
+          "Tap \"📱 Share my phone number\" below or type it.",
+        buttons: SHARE_PHONE,
+      }] };
     }
     case "ask_phone": {
       const digits = text.replace(/[^\d]/g, "");
       if (digits.length < 7) {
-        return { replies: [{ text: "That doesn't look like a full number — please send a phone we can call or WhatsApp." }] };
+        return { replies: [{ text: "That doesn't look like a full number — please send a phone we can call or WhatsApp.", buttons: SHARE_PHONE }] };
       }
       session.data.phone = text;
+      session.data.phoneVerified = deps.phoneVerified === true;
       session.step = "done";
       const d = session.data;
       const isSupport = d.category === "Support / complaint";
@@ -198,6 +210,7 @@ export async function handleMessage(session, rawText, deps = {}) {
             `Thanks, ${d.name}! You're now connected to our team here — a colleague will reply in this chat shortly. ` +
             `Feel free to keep typing. For anything urgent: 💬 ${WHATSAPP_LINK} · 📞 ${CONTACT_PHONE}\n\n` +
             `Type "menu" anytime to start over.`,
+          buttons: NO_KEYBOARD,
         }],
         lead,
         notifyHuman: true,
