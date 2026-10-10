@@ -510,6 +510,8 @@ app.post("/netlify/lead", async (req, res) => {
       d.people ? `People/footfall: ${d.people}` : null,
       d.message ? `Message: ${d.message}` : null,
       page ? `Page: ${page}` : null,
+      d.source ? `Source: ${d.source}` : null,
+      d.landing ? `Landing: ${d.landing}` : null,
       isInvest ? "→ Send the 2-page summary + data room link; book a 20-min call." : null,
     ].filter(Boolean);
     const text = (signed ? "" : "⚠️ Подпись Netlify не сошлась — проверьте JWS secret token. В CRM не ушло.\n") + lines.join("\n");
@@ -522,10 +524,11 @@ app.post("/netlify/lead", async (req, res) => {
       crmWebLead({
         form, option: d.option, name: d.name, company: d.company, phone: d.phone,
         email: d.email, people: d.people, message: d.message, page,
+        source: d.source, landing: d.landing,   // метка сайта: откуда пришёл (владелец 10.10.2026)
         submission_id: b.id || d.id,
       });
       const r = await createLead({ title: `Website: ${d.option || form} — ${d.name || d.company || d.email || "lead"}`, name: d.name, phone: d.phone, email: d.email,
-        comments: [d.company && `Company: ${d.company}`, d.people && `People: ${d.people}`, d.message, b.site_url && `Page: ${b.site_url}`].filter(Boolean).join("\n") });
+        comments: [d.company && `Company: ${d.company}`, d.people && `People: ${d.people}`, d.message, b.site_url && `Page: ${b.site_url}`, d.source && `Source: ${d.source}`].filter(Boolean).join("\n") });
       if (!r.ok) console.log("[netlify] lead not sent to Bitrix:", r.error || "not configured");
     }
   } catch (e) { console.error("[netlify] handler error:", e); }

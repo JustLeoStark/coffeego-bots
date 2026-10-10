@@ -171,7 +171,8 @@ test("ответ сотрудника через бота (/reply) тоже гл
 
 const SITE_FORM = { id: "sub-1", form_name: "contact", site_url: "https://coffee-go.ae",
   data: { name: "Anna", phone: "+971 55 000 1111", email: "anna@x.example",
-          company: "Blue Tower", message: "40 people", page: "/office" } };
+          company: "Blue Tower", message: "40 people", page: "/office",
+          source: "ads · google · CoffeeGo - Search UAE", landing: "/office-coffee-machine-dubai" } };
 
 function jws(rawBody, secret = NETLIFY_SECRET, claims = {}) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -197,7 +198,8 @@ test("заявка с сайта с подписью JWS Netlify уходит в
   assert.ok(call, "заявка ушла в CRM");
   assert.deepEqual(call.body.lead, { form: "contact", name: "Anna", company: "Blue Tower",
     phone: "+971 55 000 1111", email: "anna@x.example", message: "40 people",
-    page: "/office", submission_id: "sub-1" });
+    page: "/office", submission_id: "sub-1",
+    source: "ads · google · CoffeeGo - Search UAE", landing: "/office-coffee-machine-dubai" });
   assert.equal(call.body.bot, "CoffeeGoUAE_bot");
 });
 
