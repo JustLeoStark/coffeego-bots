@@ -12,7 +12,7 @@ process.env.CRM_INGEST_SECRET = SECRET;
 
 const {
   crmIncoming, crmOutgoing, crmWebLead, flushCrmQueue, sign, leadFields,
-  crmCallOk, crmConfigProblem, crmEnabled, MAX_ATTEMPTS, MAX_TRIES,
+  crmCallOk, mediaOf, crmConfigProblem, crmEnabled, MAX_ATTEMPTS, MAX_TRIES,
 } = await import("../crm.js");
 const { queueRange, queueLength, queuePush, queuePop, lockFlush, unlockFlush } = await import("../store.js");
 // Очередь общая на файл: тест, которому важен её состав, начинает с пустой
@@ -123,6 +123,40 @@ test("входящее и ответ бота уходят подписанны�
 test("набранный текстом телефон уходит неподтверждённым", () => {
   assert.deepEqual(leadFields({ phone: "+971 50" }), { phone: "+971 50", phone_verified: false });
   assert.equal(leadFields({}), undefined);
+});
+
+test("вложение Telegram → media для CRM: самое большое фото, имя и тип файла", () => {
+  assert.deepEqual(mediaOf({ text: "hi" }), undefined, "без файла — нет поля");
+  assert.deepEqual(mediaOf({ photo: [
+    { file_id: "small", width: 90, height: 60, file_size: 1000 },
+    { file_id: "big", width: 1280, height: 853, file_size: 90000 },
+    { file_id: "mid", width: 320, height: 213, file_size: 9000 },
+  ] }), { file_id: "big", type: "photo", file_size: 90000 });
+  assert.deepEqual(mediaOf({ document: { file_id: "d1", file_name: "act\u0000.pdf",
+                                         mime_type: "application/pdf", file_size: 5 } }),
+                   { file_id: "d1", type: "document", file_name: "act.pdf",
+                     mime_type: "application/pdf", file_size: 5 });
+  assert.equal(mediaOf({ voice: { file_id: "v", mime_type: "audio/ogg" } }).type, "voice");
+  assert.equal(mediaOf({ video: { file_id: "x" } }).type, "video");
+  assert.equal(mediaOf({ video_note: { file_id: "x" } }).type, "video");
+  assert.equal(mediaOf({ audio: { file_id: "a", file_name: "song.mp3" } }).file_name, "song.mp3");
+  assert.equal(mediaOf({ animation: { file_id: "g" }, document: { file_id: "g" } }).type, "animation",
+               "GIF приходит и документом — это анимация");
+  assert.equal(mediaOf({ document: { file_id: "z".repeat(301) } }), undefined, "длиннее 300 CRM не примет");
+});
+
+test("фото с подписью: в CRM подпись текстом и media полем", async () => {
+  const { server, calls, next } = await crmServer({ code: 200 });
+  const arrived = next();
+  crmIncoming({ chat: privateChat, message_id: 9, date: 1700000002, from: { id: 42 },
+                caption: "machine 12 ate my money",
+                photo: [{ file_id: "p-s", width: 90, height: 90 }, { file_id: "p-l", width: 800, height: 800 }] },
+              "machine 12 ate my money");
+  await arrived;
+  const item = JSON.parse(calls[0].raw).messages[0];
+  assert.equal(item.text, "machine 12 ate my money");
+  assert.deepEqual(item.media, { file_id: "p-l", type: "photo" });
+  server.close();
 });
 
 test("заявка с сайта уходит в /integrations/web-lead", async () => {

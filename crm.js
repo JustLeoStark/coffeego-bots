@@ -228,12 +228,51 @@ const userOf = (from) => {
   return { id: f.id, username: f.username || undefined, name: clean(name) || undefined };
 };
 
-/** Входящее сообщение клиента (объект message из Telegram). */
+// Вложение сообщения Telegram → поле media для CRM. Сам файл бот не
+// качает: CRM берёт его через Bot API по file_id при первом показе
+// (crm: app/services/chat_media.py, note_telegram). Ключи — как ждёт CRM:
+// {file_id, type, file_name?, mime_type?, file_size?}. Порядок важен:
+// у анимации (GIF) Telegram заполняет и document
+const MEDIA_KINDS = [
+  ["animation", "animation"], ["sticker", "sticker"], ["document", "document"],
+  ["voice", "voice"], ["video", "video"], ["video_note", "video"], ["audio", "audio"],
+];
+const FILE_ID_MAX = 300;     // длиннее CRM не примет
+
+export function mediaOf(msg) {
+  if (!msg) return undefined;
+  let file = null;
+  let type = null;
+  if (Array.isArray(msg.photo) && msg.photo.length) {
+    // Самый большой размер: по площади, при равной — по весу
+    const area = (p) => (Number(p.width) || 0) * (Number(p.height) || 0);
+    file = msg.photo.reduce((best, p) => (
+      area(p) > area(best) || (area(p) === area(best) && (p.file_size || 0) > (best.file_size || 0))
+        ? p : best));
+    type = "photo";
+  } else {
+    for (const [key, kind] of MEDIA_KINDS) {
+      if (msg[key] && msg[key].file_id) { file = msg[key]; type = kind; break; }
+    }
+  }
+  if (!file || typeof file.file_id !== "string" || !file.file_id
+      || file.file_id.length > FILE_ID_MAX) return undefined;
+  const out = { file_id: file.file_id, type };
+  if (file.file_name) out.file_name = clean(String(file.file_name)).slice(0, 255);
+  if (file.mime_type) out.mime_type = clean(String(file.mime_type)).slice(0, 100);
+  if (Number.isFinite(file.file_size)) out.file_size = file.file_size;
+  return out;
+}
+
+/** Входящее сообщение клиента (объект message из Telegram). text — то,
+ *  что написал клиент: у фото и файлов — подпись или пусто, сам файл
+ *  уходит полем media. */
 export function crmIncoming(msg, text, data) {
   if (!msg || !msg.chat || msg.chat.type !== "private") return;
   fire("tg", {
     chat_id: msg.chat.id, message_id: msg.message_id, direction: "in",
     date: msg.date, text: clean(text), user: userOf(msg.from), fields: leadFields(data),
+    media: mediaOf(msg),
   });
 }
 
@@ -245,6 +284,7 @@ export function crmOutgoing(chatId, sent, text, author, extra = {}) {
     chat_id: Number(chatId), message_id: sent.message_id, direction: "out",
     date: sent.date, text: clean(text), author, user: { id: Number(chatId) },
     fields: leadFields(extra.data), qualified: extra.qualified || undefined,
+    media: mediaOf(sent),
   });
 }
 

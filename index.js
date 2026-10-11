@@ -25,7 +25,7 @@ import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
   setHandoff, getHandoff, clearHandoff, resolveAgents, addLearned,
   logTicket, logFirstReply, regionStats, teamStatus,
-  setPause, clearPause, pauseState,
+  setPause, clearPause, pauseState, setSilence, clearSilence,
 } from "./store.js";
 import {
   regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
@@ -59,6 +59,10 @@ function getSession(key) {
 // номер телефона, а не Telegram-чат.
 // Сколько бот молчит после ответа человека (владелец 05.10.2026)
 const PAUSE_MS = 24 * 60 * 60 * 1000;
+// Пауза из CRM дальше этого срока — не «отвечает человек», а тишина
+// внутреннего контакта: CRM просит молчать на годы (internal_contacts.py,
+// TELEGRAM_SILENCE = 3650 дней), пока не вернёт контакт в лиды
+const SILENCE_AFTER_MS = 30 * PAUSE_MS;
 
 async function replyToClient(clientId, text, opts = {}) {
   const ho = await getHandoff(clientId);
@@ -190,7 +194,10 @@ app.post("/telegram/webhook", async (req, res) => {
     const toCrm = crmEnabled() && isClient;
     if (toCrm) {
       const data = getSession(`telegram:${chatId}`).data;
-      crmIncoming(msg, text, contact ? { ...data, phone: text, phoneVerified } : data);
+      // В CRM — подпись к файлу (или пусто), а не «[photo]»: сам файл
+      // уходит полем media, CRM скачает его по file_id
+      const crmText = contact ? text : (msg.text || msg.caption || "");
+      crmIncoming(msg, crmText, contact ? { ...data, phone: text, phoneVerified } : data);
     }
 
     // ----- Admin commands -----
@@ -313,7 +320,8 @@ app.post("/telegram/webhook", async (req, res) => {
       if (photoId && (!ho || ho.channel !== "whatsapp")) {
         const caption = `👤 CoffeeGo team${msg.caption ? ": " + msg.caption : ""}`;
         const sent = await sendPhotoToChat(cid, photoId, caption);
-        crmOutgoing(cid, sent, `[photo] ${caption}`, "human");
+        // Само фото — полем media (из ответа Telegram), текстом — подпись
+        crmOutgoing(cid, sent, caption, "human");
         await setPause(cid, Date.now() + PAUSE_MS);
       } else if (photoId) {
         // В WhatsApp фото пока не пересылаем — предупреждаем сотрудника,
@@ -339,6 +347,21 @@ app.post("/telegram/webhook", async (req, res) => {
       return;
     }
 
+    // Пауза (отвечает человек) и тишина (внутренний контакт CRM).
+    // Пауза неизвестна (Upstash не ответил) — тоже молчим: лучше
+    // промолчать, чем перебить человека. Если не знаем даже, кто пишет, —
+    // как клиенту: команды сотрудника выше уже не выполнились
+    let pause = msg.chat.type === "private" && status !== "staff"
+      ? (status === "unknown" ? "unknown" : await pauseState(chatId)) : "free";
+    // Внутренний контакт CRM (сотрудник, свой, партнёр, спам): ни
+    // сценария, ни ИИ, ни уведомлений команде — переписка копится в его
+    // карточке в CRM, сообщение туда уже ушло выше. Пересылку в CRM
+    // выключили — молчать некуда: бот работает как без CRM
+    if (pause === "silenced") {
+      if (toCrm) return;
+      pause = "free";
+    }
+
     // ----- Client in active handoff -> forward to their agent -----
     const ho = await getHandoff(chatId);
     if (ho && !RESET.includes(t.toLowerCase())) {
@@ -352,11 +375,6 @@ app.post("/telegram/webhook", async (req, res) => {
     }
     // Отвечает человек (из CRM или через бота) — бот молчит: сообщение
     // уже в CRM, команде — уведомление, как при запросе человека
-    // Пауза неизвестна (Upstash не ответил) — тоже молчим: лучше
-    // промолчать, чем перебить человека. Если не знаем даже, кто пишет, —
-    // как клиенту: команды сотрудника выше уже не выполнились
-    const pause = msg.chat.type === "private" && status !== "staff"
-      ? (status === "unknown" ? "unknown" : await pauseState(chatId)) : "free";
     if (pause !== "free") {
       const sess = getSession(`telegram:${chatId}`);
       for (const agent of await resolveAgents(sess.data && sess.data.category || "Human hand-off")) {
@@ -401,13 +419,21 @@ app.post("/crm/handoff", async (req, res) => {
   const chatId = Number(b.chat_id);
   if (!Number.isSafeInteger(chatId) || chatId <= 0) return res.status(400).json({ ok: false });
   if (b.action === "pause") {
-    // Не дольше недели: опечатка в CRM не должна заглушить бота навсегда
     const asked = Number(b.until) * 1000;
-    const until = Math.min(Number.isFinite(asked) && asked > Date.now() ? asked : Date.now() + PAUSE_MS,
-                           Date.now() + 7 * PAUSE_MS);
-    await setPause(chatId, until);
+    if (Number.isFinite(asked) && asked > Date.now() + SILENCE_AFTER_MS) {
+      // Внутренний контакт: молчать, пока CRM не вернёт его в лиды
+      await setSilence(chatId);
+      console.log(`[crm] чат ${chatId}: внутренний контакт — бот молчит до «Вернуть бота»`);
+    } else {
+      // Не дольше недели: опечатка в CRM не должна заглушить бота надолго
+      const until = Math.min(asked > Date.now() ? asked : Date.now() + PAUSE_MS,
+                             Date.now() + 7 * PAUSE_MS);
+      await setPause(chatId, until);
+    }
   } else if (b.action === "release") {
+    // «Вернуть бота» или контакт вернули в лиды — снимается всё
     await clearPause(chatId);
+    await clearSilence(chatId);
     await clearHandoff(chatId);
   } else {
     return res.status(400).json({ ok: false });

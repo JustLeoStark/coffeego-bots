@@ -433,13 +433,33 @@ export async function pausedUntil(chatId) {
   const v = Number(await cmd(["GET", `pause:${chatId}`]));
   return v > Date.now() ? v : 0;
 }
-/** "paused", "free" или "unknown" — Upstash не ответил (аудит 05.10:
- *  тогда бот молчит и только пересылает сотрудникам — лучше промолчать,
- *  чем перебить человека). */
+// ---- Тишина: внутренний контакт CRM (владелец 11.10.2026) ----
+// Сотрудник, свой, партнёр или спам в «CRM → Внутренние контакты»: бот в
+// этом чате не отвечает ни сценарием, ни ИИ и не дёргает команду, пока
+// CRM не вернёт контакт в лиды («release»). Сообщения по-прежнему идут в
+// CRM — там копится переписка контакта. Срока у ключа нет: CRM просит
+// «на годы», а снимает тишину явно. Паузу после ответа человека (сутки)
+// тишина не трогает, и наоборот.
+export async function setSilence(chatId) {
+  await cmd(["SET", `silence:${chatId}`, String(Date.now())]);
+}
+export async function clearSilence(chatId) {
+  await cmd(["DEL", `silence:${chatId}`]);
+}
+export async function isSilenced(chatId) {
+  return Boolean(await cmd(["GET", `silence:${chatId}`]));
+}
+
+/** "silenced" (внутренний контакт CRM), "paused", "free" или "unknown" —
+ *  Upstash не ответил (аудит 05.10: тогда бот молчит и только пересылает
+ *  сотрудникам — лучше промолчать, чем перебить человека). */
 export async function pauseState(chatId) {
   try {
-    const v = Number(await strictCmd(["GET", `pause:${chatId}`]));
-    return v > Date.now() ? "paused" : "free";
+    const [silence, pause] = await pipeline([
+      ["GET", `silence:${chatId}`], ["GET", `pause:${chatId}`],
+    ]);
+    if (silence) return "silenced";
+    return Number(pause) > Date.now() ? "paused" : "free";
   } catch (e) {
     console.error("[store] пауза не прочитана:", e.message);
     return "unknown";

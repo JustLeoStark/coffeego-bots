@@ -63,6 +63,13 @@ Sends investor-pack link (coffee-go.ae/investing.html), then:
   script and the AI stay silent in that chat for 24 hours (or until "Bring the
   bot back" in the CRM / `/close <id>`); client messages go to the CRM and the
   team chat.
+- Photos, documents, voice notes, videos and audio from the client reach the
+  CRM as files (`media` with the Telegram `file_id`; the CRM downloads them),
+  with the caption as the text.
+- Internal contacts in the CRM (staff, own people, partners, spam): the bot
+  does not answer them at all and does not ping the team; their messages still
+  go to the CRM. Lifted only when the CRM returns the contact to leads / "Bring
+  the bot back".
 - Unrecognised menu input re-shows the 4 options.
 
 ## Ideas to extend later

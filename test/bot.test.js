@@ -30,10 +30,12 @@ const tg = await listen(async (req, res) => {
   tgCalls.push({ method, body });
   const id = Number(body.chat_id);
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ ok: true, result: {
+  const result = {
     message_id: ++nextId, date: Math.floor(Date.now() / 1000),
     chat: { id, type: id > 0 ? "private" : "group" },
-  } }));
+  };
+  if (method === "sendPhoto") result.photo = [{ file_id: body.photo, width: 1280, height: 960 }];
+  res.end(JSON.stringify({ ok: true, result }));
 });
 // Поддельная CRM: что бот переслал
 const crmCalls = [];
@@ -303,4 +305,68 @@ test("nonce handoff живёт 10 минут", async () => {
   } finally {
     Date.now = realNow;
   }
+});
+
+test("фото, документ и голосовое клиента уходят в CRM файлом (media), текст — подпись", async () => {
+  await say(70, "/start");
+  await say(70, undefined, { caption: "broken cup", photo: [
+    { file_id: "ph-small", file_unique_id: "u1", width: 90, height: 90, file_size: 900 },
+    { file_id: "ph-big", file_unique_id: "u2", width: 1280, height: 1280, file_size: 99000 },
+  ] });
+  await say(70, undefined, { document: { file_id: "doc-1", file_name: "invoice.pdf",
+                                         mime_type: "application/pdf", file_size: 12345 } });
+  await say(70, undefined, { voice: { file_id: "voice-1", mime_type: "audio/ogg", file_size: 4000, duration: 3 } });
+  const got = crmMessages(70).filter((m) => m.direction === "in" && m.media);
+  assert.deepEqual(got.map((m) => [m.text, m.media]), [
+    ["broken cup", { file_id: "ph-big", type: "photo", file_size: 99000 }],
+    ["", { file_id: "doc-1", type: "document", file_name: "invoice.pdf",
+           mime_type: "application/pdf", file_size: 12345 }],
+    ["", { file_id: "voice-1", type: "voice", mime_type: "audio/ogg", file_size: 4000 }],
+  ]);
+  assert.ok(!crmMessages(70).some((m) => m.text === "[photo]"), "не «[photo]» вместо подписи");
+  assert.ok(crmMessages(70).filter((m) => m.direction === "in" && !m.media).every((m) => m.media === undefined));
+});
+
+test("фото сотрудника клиенту — в CRM тоже файлом", async () => {
+  await say(1, "look", { photo: [{ file_id: "staff-ph", width: 800, height: 600 }], caption: "look",
+                         reply_to_message: { message_id: 1, text: "📩 [#71] Kate: hi" } });
+  const out = crmMessages(71).filter((m) => m.direction === "out");
+  assert.equal(out.length, 1);
+  assert.equal(out[0].author, "human");
+  assert.deepEqual(out[0].media, { file_id: "staff-ph", type: "photo" });
+  assert.equal(out[0].text, "👤 CoffeeGo team: look");
+});
+
+test("внутренний контакт CRM: бот молчит и не зовёт команду, в CRM пересылает; «Вернуть бота» снимает", async () => {
+  const year = Math.floor(Date.now() / 1000) + 3650 * 86400;   // как internal_contacts.py
+  assert.equal((await handoff({ chat_id: 72, action: "pause", until: year })).status, 200);
+  const toAdmin = () => sentTo(1).filter((c) => c.body.text.includes("[#72]")).length;
+  await say(72, "/start");
+  await say(72, "hi, it's the accountant");
+  await say(72, undefined, { document: { file_id: "vat-1", file_name: "vat.pdf" } });
+  assert.equal(sentTo(72).length, 0, "ни сценария, ни ИИ");
+  assert.equal(toAdmin(), 0, "команду не дёргаем — переписка в CRM");
+  assert.ok(crmMessages(72).some((m) => m.text === "hi, it's the accountant"), "в CRM — как обычно");
+  assert.ok(crmMessages(72).some((m) => m.media && m.media.file_id === "vat-1"));
+
+  // Менеджер ответил контакту из CRM — пауза на сутки тишину не снимает
+  assert.equal((await handoff({ chat_id: 72, action: "pause",
+                                until: Math.floor(Date.now() / 1000) + 86400 })).status, 200);
+  await say(72, "thanks");
+  assert.equal(sentTo(72).length, 0);
+  assert.equal(toAdmin(), 0);
+
+  // Контакт вернули в лиды (или «Вернуть бота») — снова сценарий
+  assert.equal((await handoff({ chat_id: 72, action: "release" })).status, 200);
+  await say(72, "/start");
+  assert.equal(sentTo(72).length, 1);
+});
+
+test("пауза CRM до двух недель — по-прежнему не дольше недели, не тишина", async () => {
+  const { pausedUntil, isSilenced } = await import("../store.js");
+  const twoWeeks = Math.floor(Date.now() / 1000) + 14 * 86400;
+  assert.equal((await handoff({ chat_id: 73, action: "pause", until: twoWeeks })).status, 200);
+  assert.equal(await isSilenced(73), false);
+  const until = await pausedUntil(73);
+  assert.ok(until > Date.now() && until <= Date.now() + 7 * 86400 * 1000 + 1000);
 });
