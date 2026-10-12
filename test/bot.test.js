@@ -48,23 +48,13 @@ const crm = await listen(async (req, res) => {
     : { ok: true, results: (body.messages || []).map(() => "stored") }));
 });
 
-// Поддельный Bitrix24: что бот туда отправил (по умолчанию — ничего)
-const bitrixCalls = [];
-const bitrix = await listen(async (req, res) => {
-  bitrixCalls.push({ url: req.url, body: JSON.parse(await bodyOf(req)) });
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ result: 77 }));
-});
-
 Object.assign(process.env, {
   TELEGRAM_BOT_TOKEN: "123:fake", TELEGRAM_BOT_USERNAME: "CoffeeGoUAE_bot",
   TELEGRAM_API_BASE: `http://127.0.0.1:${tg.address().port}`,
   TELEGRAM_WEBHOOK_SECRET: SECRET, TELEGRAM_ADMIN_CHAT_ID: "1",
   CRM_URL: `http://127.0.0.1:${crm.address().port}`, CRM_INGEST_SECRET: CRM_SECRET,
   KEEP_AWAKE: "0", NETLIFY_LEAD_SECRET: NETLIFY_SECRET,
-  BITRIX_WEBHOOK_URL: `http://127.0.0.1:${bitrix.address().port}/rest/1/x/`,
 });
-delete process.env.BITRIX_LEADS;
 delete process.env.UPSTASH_REDIS_REST_URL;
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.PUBLIC_URL;
@@ -76,7 +66,7 @@ const bot = await new Promise((resolve) => {
 });
 const BOT = `http://127.0.0.1:${bot.address().port}`;
 
-test.after(() => { bot.close(); tg.close(); crm.close(); bitrix.close(); });
+test.after(() => { bot.close(); tg.close(); crm.close(); });
 
 let updateId = 1;
 function update(chatId, extra) {
@@ -416,10 +406,10 @@ test("intake: только подписанный вызов CRM, nonce одно
   assert.equal(await intakeOn(), false);
   const version = await (await fetch(`${BOT}/version`)).json();
   assert.equal(version.crm_intake, false);
-  assert.equal(version.bitrix, false, "Bitrix по умолчанию выключен");
+  assert.equal(version.bitrix, undefined, "Bitrix24 из бота удалён");
 });
 
-test("приём ведёт CRM: на /start, текст и фото бот молчит, всё — в CRM, команде и в Bitrix — ничего", async () => {
+test("приём ведёт CRM: на /start, текст и фото бот молчит, всё — в CRM, команде — ничего", async () => {
   // Текущий разговор: клиент 81 уже в меню сценария
   await say(81, "/start");
   await say(81, "1");
@@ -458,7 +448,6 @@ test("приём ведёт CRM: на /start, текст и фото бот мо
   } finally {
     await intake(false);
   }
-  assert.equal(bitrixCalls.length, 0);
 
   // Галочку сняли — снова сценарий бота
   await say(80, "/start");
@@ -466,24 +455,3 @@ test("приём ведёт CRM: на /start, текст и фото бот мо
   assert.ok(sentTo(80)[0].body.text.includes("CoffeeGo AI assistant"));
 });
 
-test("Bitrix24: по умолчанию лиды сценария и сайта туда не уходят; BITRIX_LEADS=1 — уходят", async () => {
-  for (const text of ["human", "Bob", "+971 55 123 4567"]) await say(83, text);
-  await netlify({ ...SITE_FORM, id: "sub-b1" }, { token: true });
-  await settle();
-  assert.ok(toTeamAbout(83).some((c) => c.body.text.includes("New chat handed to you")),
-            "команде — как раньше");
-  assert.ok(webLeads().some((c) => c.body.lead.submission_id === "sub-b1"), "в CRM — как раньше");
-  assert.equal(bitrixCalls.length, 0, "ни сценарий, ни сайт в Bitrix не шлют");
-
-  process.env.BITRIX_LEADS = "1";
-  try {
-    for (const text of ["human", "Kim", "+971 55 765 4321"]) await say(84, text);
-    await netlify({ ...SITE_FORM, id: "sub-b2" }, { token: true });
-    await settle();
-  } finally {
-    delete process.env.BITRIX_LEADS;
-  }
-  assert.equal(bitrixCalls.length, 2);
-  assert.ok(bitrixCalls.every((c) => c.url.endsWith("/crm.lead.add.json")));
-  assert.deepEqual(bitrixCalls.map((c) => c.body.fields.NAME), ["Kim", "Anna"]);
-});

@@ -55,8 +55,8 @@ Sends investor-pack link (coffee-go.ae/investing.html), then:
 
 ## Every completed branch
 
-- The lead reaches CoffeeGo CRM from the forwarded conversation. Bitrix24
-  (`crm.lead.add`) is off since 12.10.2026 — only with `BITRIX_LEADS=1`.
+- The lead reaches CoffeeGo CRM from the forwarded conversation. Bitrix24 is
+  no longer used (removed 12.10.2026).
 - Sends the user CoffeeGo's direct contact (+971 58 532 9288, coffee-go.ae).
 - Pings the Telegram admin chat (if configured) so a human sees it in real time.
 

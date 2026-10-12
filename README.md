@@ -1,13 +1,12 @@
-# CoffeeGo lead bot — Telegram + WhatsApp → Bitrix24
+# CoffeeGo lead bot — Telegram + WhatsApp → CoffeeGo CRM
 
 A single Node service that runs a scripted, English-language qualification chat on
 **Telegram** and **WhatsApp (Meta Cloud API)**, and drops every qualified conversation
-into **Bitrix24** as a lead. When a user asks for a person, it also pings an admin chat.
+into **CoffeeGo CRM** as a lead. When a user asks for a person, it also pings an admin chat.
 
 ```
 index.js     Express server: Telegram + WhatsApp webhooks
 engine.js    Conversation script (the flow lives here — edit freely)
-bitrix.js    crm.lead.add via inbound webhook (off; BITRIX_LEADS=1 — on)
 crm.js       Telegram conversation + website leads → CoffeeGo CRM (signed, retried)
 netlify.js   Netlify webhook check (JWS X-Webhook-Signature, fallback ?key=)
 telegram.js  Telegram send + admin notify + setWebhook
@@ -37,21 +36,11 @@ whatsapp.js  WhatsApp Cloud API send + webhook verify + parse
    `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`, вписать в
    `TELEGRAM_WEBHOOK_SECRET` и перезапустить — бот сам переподпишет вебхук.
 
-## 3. Bitrix24 lead hand-off
+## 3. Лиды — только CoffeeGo CRM
 
-**С 12.10.2026 выключено по умолчанию** (владелец: «убрать отправку лидов в
-Bitrix24», лиды ведёт CoffeeGo CRM). Лиды сценария бота и заявки с сайта
-уходят в Bitrix, только если задан `BITRIX_LEADS=1` (на Render его нет).
-Прежний `BITRIX_ENABLED` больше не читается.
-
-1. Bitrix24 → **Developer resources → Other → Inbound webhook**.
-2. Grant the **crm** scope. Copy the webhook URL — it looks like:
-   `https://YOURACCOUNT.bitrix24.com/rest/1/XXXXXXXXXXXX/`
-3. Put it in `BITRIX_WEBHOOK_URL` (keep the trailing slash).
-4. (Optional) `BITRIX_ASSIGNED_TO` = the Bitrix user id who should own new leads.
-
-Until this is set, leads are only logged to the console and sent to the admin chat —
-nothing breaks, so you can launch Telegram first and wire Bitrix in after.
+Bitrix24 больше не используется и не рассматривается (владелец 12.10.2026):
+модуль `bitrix.js` удалён, лиды сценария и заявки с сайта ведёт CoffeeGo CRM
+(`crm.js`). Переменные `BITRIX_*` на Render можно удалить.
 
 ## 4. WhatsApp (Meta Cloud API) — add when ready
 

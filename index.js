@@ -7,7 +7,6 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleMessage } from "./engine.js";
 import { askAI } from "./ai.js";
-import { createLead, bitrixEnabled } from "./bitrix.js";
 import {
   crmIncoming, crmOutgoing, crmEnabled, startCrmRetry, crmWebLead,
   crmCallOk,
@@ -99,14 +98,9 @@ async function runEngine(channel, userId, text, send, clientName, region, toCrm 
   }
 
   if (result.lead) {
-    // Bitrix24 — только по BITRIX_LEADS=1 (владелец 12.10: старая CRM не
-    // используется); выключен — createLead ничего не шлёт
-    const r = await createLead(result.lead);
-    const inCrm = toCrm && crmEnabled();
-    result.lead._tag = r.ok
-      ? `Bitrix lead #${r.id}${inCrm ? " · CoffeeGo CRM" : ""}`
-      : inCrm ? "lead → CoffeeGo CRM"
-        : bitrixEnabled() ? `lead (Bitrix ${r.error || "not configured"})` : "lead";
+    // Лиды ведёт только CoffeeGo CRM (владелец 12.10: Bitrix24 больше не
+    // используется и не рассматривается — модуль удалён)
+    result.lead._tag = toCrm && crmEnabled() ? "lead → CoffeeGo CRM" : "lead";
   }
 
   if (result.openHandoff) {
@@ -540,7 +534,7 @@ app.get("/whatsapp/health", (_req, res) => {
 app.post("/netlify/lead", async (req, res) => {
   // Подпись не сошлась — заявку всё равно показываем команде в Telegram, как
   // было до 05.10 (владелец не должен терять заявки из-за настройки ключа),
-  // но в CRM и Bitrix не отправляем: там только проверенные.
+  // но в CRM не отправляем: там только проверенные.
   const signed = netlifyOk(req);
   if (!signed) console.warn("[netlify] подпись не сошлась — заявка только в Telegram, без CRM");
   res.sendStatus(200);
@@ -579,12 +573,6 @@ app.post("/netlify/lead", async (req, res) => {
         source: d.source, landing: d.landing,   // метка сайта: откуда пришёл (владелец 10.10.2026)
         submission_id: b.id || d.id,
       });
-      // Bitrix24 — только по BITRIX_LEADS=1 (владелец 12.10: не используется)
-      if (bitrixEnabled()) {
-        const r = await createLead({ title: `Website: ${d.option || form} — ${d.name || d.company || d.email || "lead"}`, name: d.name, phone: d.phone, email: d.email,
-          comments: [d.company && `Company: ${d.company}`, d.people && `People: ${d.people}`, d.message, b.site_url && `Page: ${b.site_url}`, d.source && `Source: ${d.source}`].filter(Boolean).join("\n") });
-        if (!r.ok) console.log("[netlify] lead not sent to Bitrix:", r.error || "not configured");
-      }
     }
   } catch (e) { console.error("[netlify] handler error:", e); }
 });
@@ -601,7 +589,6 @@ app.get("/version", async (_req, res) => res.json({
   crm: crmEnabled(),
   // Вебхук Telegram принимает только вызовы с секретом
   telegram_webhook_secret: Boolean(webhookSecret()),
-  bitrix: bitrixEnabled() && Boolean(process.env.BITRIX_WEBHOOK_URL),
   // Приём новых обращений в Telegram ведёт CRM (null — Upstash не ответил)
   crm_intake: await intakeOn(),
 }));

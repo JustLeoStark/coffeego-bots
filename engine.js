@@ -1,6 +1,6 @@
 // CoffeeGo lead bot — conversation engine (channel-agnostic, English).
 // Pure logic: given a session and an incoming text, returns reply messages,
-// an optional `lead` object to push to Bitrix24, and whether to notify a human.
+// an optional `lead` object for the CRM, and whether to notify a human.
 
 const CONTACT_PHONE = "+971 58 532 9288";
 const WHATSAPP_LINK = "https://wa.me/971585329288";
