@@ -48,13 +48,23 @@ const crm = await listen(async (req, res) => {
     : { ok: true, results: (body.messages || []).map(() => "stored") }));
 });
 
+// Поддельный Bitrix24: что бот туда отправил (по умолчанию — ничего)
+const bitrixCalls = [];
+const bitrix = await listen(async (req, res) => {
+  bitrixCalls.push({ url: req.url, body: JSON.parse(await bodyOf(req)) });
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ result: 77 }));
+});
+
 Object.assign(process.env, {
   TELEGRAM_BOT_TOKEN: "123:fake", TELEGRAM_BOT_USERNAME: "CoffeeGoUAE_bot",
   TELEGRAM_API_BASE: `http://127.0.0.1:${tg.address().port}`,
   TELEGRAM_WEBHOOK_SECRET: SECRET, TELEGRAM_ADMIN_CHAT_ID: "1",
   CRM_URL: `http://127.0.0.1:${crm.address().port}`, CRM_INGEST_SECRET: CRM_SECRET,
-  BITRIX_ENABLED: "0", KEEP_AWAKE: "0", NETLIFY_LEAD_SECRET: NETLIFY_SECRET,
+  KEEP_AWAKE: "0", NETLIFY_LEAD_SECRET: NETLIFY_SECRET,
+  BITRIX_WEBHOOK_URL: `http://127.0.0.1:${bitrix.address().port}/rest/1/x/`,
 });
+delete process.env.BITRIX_LEADS;
 delete process.env.UPSTASH_REDIS_REST_URL;
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.PUBLIC_URL;
@@ -66,7 +76,7 @@ const bot = await new Promise((resolve) => {
 });
 const BOT = `http://127.0.0.1:${bot.address().port}`;
 
-test.after(() => { bot.close(); tg.close(); crm.close(); });
+test.after(() => { bot.close(); tg.close(); crm.close(); bitrix.close(); });
 
 let updateId = 1;
 function update(chatId, extra) {
@@ -369,4 +379,111 @@ test("пауза CRM до двух недель — по-прежнему не �
   assert.equal(await isSilenced(73), false);
   const until = await pausedUntil(73);
   assert.ok(until > Date.now() && until <= Date.now() + 7 * 86400 * 1000 + 1000);
+});
+
+// ---- Приём ведёт CRM (владелец 12.10.2026) ----
+
+async function intake(enabled) {
+  const res = await handoff({ action: "intake", enabled });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, intake: enabled });
+}
+const photosAbout = (chatId) => tgCalls.filter((c) => c.method === "sendPhoto" &&
+  String(c.body.caption || "").includes(`[#${chatId}]`));
+const toTeamAbout = (chatId) => tgCalls.filter((c) => c.method === "sendMessage" &&
+  Number(c.body.chat_id) !== chatId && String(c.body.text || "").includes(`[#${chatId}]`));
+
+test("intake: только подписанный вызов CRM, nonce одноразовый, enabled — да/нет", async () => {
+  const { intakeOn } = await import("../store.js");
+  assert.equal((await handoff({ action: "intake", enabled: true }, "guess-guess-guess-guess-guess-guess")).status, 401);
+  assert.equal((await handoff({ action: "intake", enabled: true }, CRM_SECRET, "ingest")).status, 401,
+               "подпись пересылки не годится");
+  assert.equal(await intakeOn(), false, "неподписанное не записано");
+  // Повтор того же вызова (тот же nonce) — отказ
+  const raw = JSON.stringify({ action: "intake", enabled: true, nonce: randomBytes(12).toString("hex") });
+  const send = () => {
+    const stamp = String(Math.floor(Date.now() / 1000));
+    return fetch(`${BOT}/crm/handoff`, { method: "POST", body: raw,
+      headers: { "Content-Type": "application/json", "X-Timestamp": stamp,
+                 "X-Signature": sign("handoff", raw, stamp, CRM_SECRET) } });
+  };
+  assert.equal((await send()).status, 200);
+  assert.equal(await intakeOn(), true);
+  assert.equal((await send()).status, 401, "тот же nonce второй раз");
+  assert.equal((await handoff({ action: "intake", enabled: "yes" })).status, 400);
+  assert.equal((await handoff({ action: "intake" })).status, 400);
+  await intake(false);
+  assert.equal(await intakeOn(), false);
+  const version = await (await fetch(`${BOT}/version`)).json();
+  assert.equal(version.crm_intake, false);
+  assert.equal(version.bitrix, false, "Bitrix по умолчанию выключен");
+});
+
+test("приём ведёт CRM: на /start, текст и фото бот молчит, всё — в CRM, команде и в Bitrix — ничего", async () => {
+  // Текущий разговор: клиент 81 уже в меню сценария
+  await say(81, "/start");
+  await say(81, "1");
+  assert.equal(sentTo(81).length, 2);
+  await intake(true);
+  try {
+    await say(80, "/start");
+    await say(80, "Hi, I need a coffee machine for my office");
+    await say(80, "human");
+    await say(80, undefined, { caption: "our kitchen", photo: [{ file_id: "kitchen-1", width: 800, height: 600 }] });
+    await say(80, "menu");
+    assert.equal(sentTo(80).length, 0, "ни сценария, ни ИИ, ни приветствия");
+    assert.equal(toTeamAbout(80).length + photosAbout(80).length, 0, "команде — ни «новый лид», ни фото");
+    const got = crmMessages(80).filter((m) => m.direction === "in");
+    assert.deepEqual(got.map((m) => m.text),
+                     ["/start", "Hi, I need a coffee machine for my office", "human", "our kitchen", "menu"]);
+    assert.deepEqual(got[3].media, { file_id: "kitchen-1", type: "photo" });
+    assert.equal(crmMessages(80).filter((m) => m.direction === "out").length, 0);
+
+    // Текущий разговор тоже замолк — посреди сценария
+    for (const text of ["Dubai", "40", "Ivan", "+971 50 111 2222"]) await say(81, text);
+    assert.equal(sentTo(81).length, 2, "сценарий не продолжился");
+    assert.equal(toTeamAbout(81).length, 0, "лид из сценария команде не ушёл");
+    assert.ok(crmMessages(81).some((m) => m.text === "+971 50 111 2222"));
+
+    // Пауза (человек из CRM ответил) — как раньше: молчим, команде уведомление
+    assert.equal((await handoff({ chat_id: 82, action: "pause",
+                                  until: Math.floor(Date.now() / 1000) + 3600 })).status, 200);
+    await say(82, "still there?");
+    assert.equal(sentTo(82).length, 0);
+    assert.ok(toTeamAbout(82).some((c) => c.body.text.includes("отвечает человек")));
+
+    // Сотрудник (админ) — не клиент: ему бот отвечает как раньше
+    await say(1, "/start");
+    assert.ok(sentTo(1).at(-1).body.text.includes("CoffeeGo AI assistant"));
+  } finally {
+    await intake(false);
+  }
+  assert.equal(bitrixCalls.length, 0);
+
+  // Галочку сняли — снова сценарий бота
+  await say(80, "/start");
+  assert.equal(sentTo(80).length, 1);
+  assert.ok(sentTo(80)[0].body.text.includes("CoffeeGo AI assistant"));
+});
+
+test("Bitrix24: по умолчанию лиды сценария и сайта туда не уходят; BITRIX_LEADS=1 — уходят", async () => {
+  for (const text of ["human", "Bob", "+971 55 123 4567"]) await say(83, text);
+  await netlify({ ...SITE_FORM, id: "sub-b1" }, { token: true });
+  await settle();
+  assert.ok(toTeamAbout(83).some((c) => c.body.text.includes("New chat handed to you")),
+            "команде — как раньше");
+  assert.ok(webLeads().some((c) => c.body.lead.submission_id === "sub-b1"), "в CRM — как раньше");
+  assert.equal(bitrixCalls.length, 0, "ни сценарий, ни сайт в Bitrix не шлют");
+
+  process.env.BITRIX_LEADS = "1";
+  try {
+    for (const text of ["human", "Kim", "+971 55 765 4321"]) await say(84, text);
+    await netlify({ ...SITE_FORM, id: "sub-b2" }, { token: true });
+    await settle();
+  } finally {
+    delete process.env.BITRIX_LEADS;
+  }
+  assert.equal(bitrixCalls.length, 2);
+  assert.ok(bitrixCalls.every((c) => c.url.endsWith("/crm.lead.add.json")));
+  assert.deepEqual(bitrixCalls.map((c) => c.body.fields.NAME), ["Kim", "Anna"]);
 });

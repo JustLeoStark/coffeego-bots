@@ -1,18 +1,19 @@
 // Bitrix24 lead creation via inbound webhook.
 // Set BITRIX_WEBHOOK_URL to your inbound webhook base, e.g.
 //   https://YOURACCOUNT.bitrix24.com/rest/1/XXXXXXXXXXXXXXXX/
-// The bot calls crm.lead.add on it. If the var is unset, leads are logged only.
+// The bot calls crm.lead.add on it only with BITRIX_LEADS=1 (off by default).
 
 const WEBHOOK = process.env.BITRIX_WEBHOOK_URL || "";
 
-// Выключатель Bitrix24 на время перехода в CoffeeGo CRM: BITRIX_ENABLED=0 —
-// лиды в Bitrix больше не уходят (лиды из чата бота тогда заводит CRM из
-// пересланной переписки, см. crm.js). По умолчанию — как было.
-export const bitrixEnabled = () => process.env.BITRIX_ENABLED !== "0";
+// Bitrix24 больше не используется (владелец 12.10.2026: «убрать отправку
+// лидов в Bitrix24»): лиды из чата бота и заявки с сайта ведёт CoffeeGo
+// CRM (crm.js). По умолчанию в Bitrix ничего не уходит; вернуть —
+// BITRIX_LEADS=1 (и BITRIX_WEBHOOK_URL). Прежний BITRIX_ENABLED не читается.
+export const bitrixEnabled = () => process.env.BITRIX_LEADS === "1";
 
 export async function createLead(lead) {
   if (!bitrixEnabled()) {
-    console.log("[bitrix] выключен (BITRIX_ENABLED=0) — лид не отправлен:", lead.title || "");
+    return { ok: false, skipped: true, error: "disabled" };
     return { ok: false, skipped: true, error: "disabled" };
   }
   const fields = {

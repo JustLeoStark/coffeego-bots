@@ -25,7 +25,7 @@ import {
   recordSubscriber, listSubscribers, setAssignment, getAssignments,
   setHandoff, getHandoff, clearHandoff, resolveAgents, addLearned,
   logTicket, logFirstReply, regionStats, teamStatus,
-  setPause, clearPause, pauseState, setSilence, clearSilence,
+  setPause, clearPause, pauseState, setSilence, clearSilence, setIntake, intakeOn,
 } from "./store.js";
 import {
   regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
@@ -99,12 +99,14 @@ async function runEngine(channel, userId, text, send, clientName, region, toCrm 
   }
 
   if (result.lead) {
+    // Bitrix24 — только по BITRIX_LEADS=1 (владелец 12.10: старая CRM не
+    // используется); выключен — createLead ничего не шлёт
     const r = await createLead(result.lead);
     const inCrm = toCrm && crmEnabled();
     result.lead._tag = r.ok
       ? `Bitrix lead #${r.id}${inCrm ? " · CoffeeGo CRM" : ""}`
       : inCrm ? "lead → CoffeeGo CRM"
-        : `lead (Bitrix ${r.error || "not configured"})`;
+        : bitrixEnabled() ? `lead (Bitrix ${r.error || "not configured"})` : "lead";
   }
 
   if (result.openHandoff) {
@@ -361,6 +363,10 @@ app.post("/telegram/webhook", async (req, res) => {
       if (toCrm) return;
       pause = "free";
     }
+    // Приём ведёт CRM («Кофик», владелец 12.10): ни сценария, ни ИИ, ни
+    // /start, ни «новый лид» команде — сообщение уже ушло в CRM выше.
+    // Пересылки в CRM нет (не клиент, выключена) — бот работает как раньше
+    if (pause === "intake" && !toCrm) pause = "free";
 
     // ----- Client in active handoff -> forward to their agent -----
     const ho = await getHandoff(chatId);
@@ -371,6 +377,12 @@ app.post("/telegram/webhook", async (req, res) => {
         if (photoId) await sendPhotoToChat(agent, photoId, `📩 [#${chatId}] ${clientName}${msg.caption ? ": " + msg.caption : ""}`);
         else await sendTelegram(agent, `📩 [#${chatId}] ${clientName}: ${text}`);
       }
+      return;
+    }
+    // Старая живая переписка через бота (выше) идёт как шла; «/start» в
+    // ней при приёме CRM только закрывает её — меню не показываем
+    if (pause === "intake") {
+      if (ho) await clearHandoff(chatId);
       return;
     }
     // Отвечает человек (из CRM или через бота) — бот молчит: сообщение
@@ -415,6 +427,20 @@ app.post("/crm/handoff", async (req, res) => {
   if (!(await crmCallOk("handoff", req.rawBody, req.get("x-timestamp"),
                         req.get("x-signature"), b.nonce))) {
     return res.sendStatus(401);
+  }
+  // Приём новых обращений ведёт CRM (галочка на /assistant): флаг на весь
+  // бот, без chat_id. Не записался в Upstash — 503: CRM покажет, что бот
+  // не получил настройку, и повторит при часовой сверке
+  if (b.action === "intake") {
+    if (typeof b.enabled !== "boolean") return res.status(400).json({ ok: false });
+    try {
+      await setIntake(b.enabled);
+    } catch (e) {
+      console.error("[crm] флаг приёма не записан:", e.message);
+      return res.status(503).json({ ok: false });
+    }
+    console.log(`[crm] приём новых обращений в Telegram ведёт ${b.enabled ? "CRM — сценарий бота молчит" : "бот"}`);
+    return res.json({ ok: true, intake: b.enabled });
   }
   const chatId = Number(b.chat_id);
   if (!Number.isSafeInteger(chatId) || chatId <= 0) return res.status(400).json({ ok: false });
@@ -546,16 +572,19 @@ app.post("/netlify/lead", async (req, res) => {
     const recipients = isInvest ? await resolveAgents("Invest") : await leadRecipients(ADMIN);
     for (const id of recipients) await sendTelegram(id, "🔔 " + text);
     if (!isNews && signed) {
-      // Лидом в CoffeeGo CRM (владелец 05.10.2026); Bitrix — как раньше
+      // Лидом в CoffeeGo CRM (владелец 05.10.2026)
       crmWebLead({
         form, option: d.option, name: d.name, company: d.company, phone: d.phone,
         email: d.email, people: d.people, message: d.message, page,
         source: d.source, landing: d.landing,   // метка сайта: откуда пришёл (владелец 10.10.2026)
         submission_id: b.id || d.id,
       });
-      const r = await createLead({ title: `Website: ${d.option || form} — ${d.name || d.company || d.email || "lead"}`, name: d.name, phone: d.phone, email: d.email,
-        comments: [d.company && `Company: ${d.company}`, d.people && `People: ${d.people}`, d.message, b.site_url && `Page: ${b.site_url}`, d.source && `Source: ${d.source}`].filter(Boolean).join("\n") });
-      if (!r.ok) console.log("[netlify] lead not sent to Bitrix:", r.error || "not configured");
+      // Bitrix24 — только по BITRIX_LEADS=1 (владелец 12.10: не используется)
+      if (bitrixEnabled()) {
+        const r = await createLead({ title: `Website: ${d.option || form} — ${d.name || d.company || d.email || "lead"}`, name: d.name, phone: d.phone, email: d.email,
+          comments: [d.company && `Company: ${d.company}`, d.people && `People: ${d.people}`, d.message, b.site_url && `Page: ${b.site_url}`, d.source && `Source: ${d.source}`].filter(Boolean).join("\n") });
+        if (!r.ok) console.log("[netlify] lead not sent to Bitrix:", r.error || "not configured");
+      }
     }
   } catch (e) { console.error("[netlify] handler error:", e); }
 });
@@ -565,7 +594,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // Какая версия работает: Render кладёт коммит в RENDER_GIT_COMMIT. Нужно,
 // чтобы проверить, подхватил ли он выкладку, — без доступа к Render
 const STARTED = new Date().toISOString();
-app.get("/version", (_req, res) => res.json({
+app.get("/version", async (_req, res) => res.json({
   commit: (process.env.RENDER_GIT_COMMIT || "unknown").slice(0, 7),
   started: STARTED,
   // Куда идут лиды — без раскрытия адресов и ключей
@@ -573,6 +602,8 @@ app.get("/version", (_req, res) => res.json({
   // Вебхук Telegram принимает только вызовы с секретом
   telegram_webhook_secret: Boolean(webhookSecret()),
   bitrix: bitrixEnabled() && Boolean(process.env.BITRIX_WEBHOOK_URL),
+  // Приём новых обращений в Telegram ведёт CRM (null — Upstash не ответил)
+  crm_intake: await intakeOn(),
 }));
 
 export { app };

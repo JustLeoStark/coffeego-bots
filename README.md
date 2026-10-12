@@ -7,7 +7,7 @@ into **Bitrix24** as a lead. When a user asks for a person, it also pings an adm
 ```
 index.js     Express server: Telegram + WhatsApp webhooks
 engine.js    Conversation script (the flow lives here — edit freely)
-bitrix.js    crm.lead.add via inbound webhook (BITRIX_ENABLED=0 — off)
+bitrix.js    crm.lead.add via inbound webhook (off; BITRIX_LEADS=1 — on)
 crm.js       Telegram conversation + website leads → CoffeeGo CRM (signed, retried)
 netlify.js   Netlify webhook check (JWS X-Webhook-Signature, fallback ?key=)
 telegram.js  Telegram send + admin notify + setWebhook
@@ -38,6 +38,11 @@ whatsapp.js  WhatsApp Cloud API send + webhook verify + parse
    `TELEGRAM_WEBHOOK_SECRET` и перезапустить — бот сам переподпишет вебхук.
 
 ## 3. Bitrix24 lead hand-off
+
+**С 12.10.2026 выключено по умолчанию** (владелец: «убрать отправку лидов в
+Bitrix24», лиды ведёт CoffeeGo CRM). Лиды сценария бота и заявки с сайта
+уходят в Bitrix, только если задан `BITRIX_LEADS=1` (на Render его нет).
+Прежний `BITRIX_ENABLED` больше не читается.
 
 1. Bitrix24 → **Developer resources → Other → Inbound webhook**.
 2. Grant the **crm** scope. Copy the webhook URL — it looks like:
@@ -103,8 +108,8 @@ https URL it prints as `PUBLIC_URL`.
   карточку лида или клиента одной лентой с WhatsApp; новый собеседник
   становится лидом «Telegram»;
 - каждую заявку с сайта (Netlify, кроме подписки на новости) —
-  `POST CRM_URL/integrations/web-lead`: лид «Сайт». Bitrix получает её как
-  раньше, пока `BITRIX_ENABLED` не `0`.
+  `POST CRM_URL/integrations/web-lead`: лид «Сайт». В Bitrix — только при
+  `BITRIX_LEADS=1`.
 
 Подпись: `X-Timestamp` (секунды) и `X-Signature: sha256=<hex>`, hex —
 HMAC-SHA256 секретом `CRM_INGEST_SECRET` от строки
@@ -173,6 +178,30 @@ CRM не ответила (сеть, 5xx, 429) 60 раз, уходит в `crm:d
 «Вернуть бота»). Пересылку в CRM выключили — тишина не действует, бот
 отвечает как без CRM.
 
+**Приём ведёт CRM** (владелец 12.10.2026). Галочка «Сценарий для входящих»
+на странице CRM `/assistant` — новые обращения в Telegram ведёт «Кофик» из
+CRM. CRM сообщает это боту тем же подписанным `POST /crm/handoff` (с
+`nonce`): `{"action": "intake", "enabled": true|false, "nonce"}` — без
+`chat_id`, флаг на весь бот: ключ Upstash `crm:intake` без срока (снят —
+ключа нет). Сохранили галочку — вызов сразу; кроме того, CRM повторяет
+текущее значение каждый час (проход `run_rules`), чтобы бот не разошёлся с
+CRM после сбоя. Ответ `200 {"ok": true, "intake": <bool>}`; Upstash не
+записал — `503` (CRM покажет «бот Telegram не получил настройку»);
+`enabled` не true/false — `400`.
+
+Пока флаг стоит, в личке клиента бот не отвечает ни сценарием (меню),
+ни ИИ, ни на `/start`, и команде не шлёт «новый лид» из своего сценария —
+новые и уже начатые разговоры. Все сообщения клиента (с файлами) уходят в
+CRM как обычно. Как раньше: пауза после ответа человека (молчит, команде
+пометка «отвечает человек»), тишина внутренних контактов, старая живая
+переписка через бота (`[#id]`) — её сообщения идут сотруднику, `/start` в
+ней только закрывает её. Сотрудникам и админу бот отвечает как раньше;
+WhatsApp флаг не трогает. Пересылку в CRM выключили — флаг не действует.
+Флаг не читается (Upstash сбоит) — бот клиенту не отвечает (лучше
+промолчать, чем ответить вторым голосом), но пересылает. Снимают галочку —
+`"enabled": false`, бот снова работает своим сценарием. `GET /version` —
+поле `crm_intake` (`null` — Upstash не ответил).
+
 Не пересылаются: группы, админ, команда и все, у кого есть роль или
 назначение (`/team`, `/assign`; состав читается пайплайном Upstash и
 помнится минуту), WhatsApp-переписка бота.
@@ -189,7 +218,7 @@ CRM не ответила (сеть, 5xx, 429) 60 раз, уходит в `crm:d
 Все сообщения `sendTelegram` уходят простым текстом, без `parse_mode`: в них
 попадают имя и слова клиента и поля заявки с сайта.
 
-`GET /version` показывает `crm`, `bitrix` и `telegram_webhook_secret` —
+`GET /version` показывает `crm`, `bitrix`, `crm_intake` и `telegram_webhook_secret` —
 включены ли (без адресов и ключей). Проверки: `npm test` — без сети:
 Telegram и CRM — локальные серверы в тесте.
 
@@ -201,11 +230,11 @@ Change wording, add questions, or add branches there. `SCRIPT.md` describes the 
 ## Notes
 
 - Sessions are in-memory: a restart forgets in-progress chats (finished leads are already
-  in Bitrix). For heavy volume, swap the `Map` in `index.js` for Redis.
+  in CoffeeGo CRM). For heavy volume, swap the `Map` in `index.js` for Redis.
 - No secrets are committed — everything sensitive lives in `.env`.
 
 
-## Website leads (Netlify Forms → Telegram → Bitrix + CoffeeGo CRM)
+## Website leads (Netlify Forms → Telegram + CoffeeGo CRM)
 
 Netlify → Project configuration → Notifications → Form submission notifications →
 **Add notification → Outgoing webhook**: event `New form submission`, URL
@@ -227,5 +256,5 @@ Netlify подписывает каждый вызов заголовком `X-W
   дописываются заметкой к последнему лиду.
 
 The bot forwards every website form to the sales responsible (`/assign sales <id>`),
-copies the admin, sends it to CoffeeGo CRM as a lead (except newsletter sign-ups) and
-creates a Bitrix lead when the webhook is configured and `BITRIX_ENABLED` is not `0`.
+copies the admin and sends it to CoffeeGo CRM as a lead (except newsletter sign-ups).
+A Bitrix lead is created only with `BITRIX_LEADS=1` and the webhook configured.

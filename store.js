@@ -450,16 +450,41 @@ export async function isSilenced(chatId) {
   return Boolean(await cmd(["GET", `silence:${chatId}`]));
 }
 
-/** "silenced" (внутренний контакт CRM), "paused", "free" или "unknown" —
- *  Upstash не ответил (аудит 05.10: тогда бот молчит и только пересылает
- *  сотрудникам — лучше промолчать, чем перебить человека). */
+// ---- CRM ведёт приём (владелец 12.10.2026) ----
+// Новые обращения в Telegram ведёт «Кофик» из CRM (галочка «Сценарий для
+// входящих» на /assistant). Пока флаг стоит, сценарий бота, его ИИ и
+// /start клиентам не отвечают — бот только пересылает переписку в CRM.
+// Флаг общий на весь бот, без срока: ставит и снимает CRM вызовом
+// /crm/handoff {action: "intake"} и сверяет раз в час. Запись — только в
+// Upstash (strictCmd): сбой — исключение, CRM узнает, что бот не получил
+// настройку, а не запишет её в память до перезапуска.
+const INTAKE_KEY = "crm:intake";
+export async function setIntake(enabled) {
+  if (enabled) await strictCmd(["SET", INTAKE_KEY, String(Date.now())]);
+  else await strictCmd(["DEL", INTAKE_KEY]);
+}
+/** true / false; null — Upstash не ответил. */
+export async function intakeOn() {
+  try {
+    return Boolean(await strictCmd(["GET", INTAKE_KEY]));
+  } catch (e) {
+    console.error("[store] флаг приёма CRM не прочитан:", e.message);
+    return null;
+  }
+}
+
+/** "silenced" (внутренний контакт CRM), "paused", "intake" (приём ведёт
+ *  CRM), "free" или "unknown" — Upstash не ответил (аудит 05.10: тогда
+ *  бот молчит и только пересылает — лучше промолчать, чем перебить
+ *  человека или ответить клиенту вторым голосом рядом с CRM). */
 export async function pauseState(chatId) {
   try {
-    const [silence, pause] = await pipeline([
-      ["GET", `silence:${chatId}`], ["GET", `pause:${chatId}`],
+    const [silence, pause, intake] = await pipeline([
+      ["GET", `silence:${chatId}`], ["GET", `pause:${chatId}`], ["GET", INTAKE_KEY],
     ]);
     if (silence) return "silenced";
-    return Number(pause) > Date.now() ? "paused" : "free";
+    if (Number(pause) > Date.now()) return "paused";
+    return intake ? "intake" : "free";
   } catch (e) {
     console.error("[store] пауза не прочитана:", e.message);
     return "unknown";

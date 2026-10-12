@@ -3,6 +3,13 @@
 This is the flow implemented in `src/engine.js`. Edit wording there; this doc mirrors it
 for review. Users can type `menu` anytime to restart, or `human` to jump straight to a person.
 
+**When the CRM runs intake** (owner, 12.10.2026: the "Intake scenario" checkbox on the
+CRM `/assistant` page): in Telegram this whole script — the menu, the AI answers and the
+`/start` welcome — is off for clients, new and ongoing chats alike. Kofik in the CRM
+answers instead; the bot only forwards every client message (with files) to the CRM and
+sends the team no "new lead" from its own script. Unchecking the box brings this script
+back. WhatsApp is not affected.
+
 ## Welcome (on /start, hi, menu)
 
 > Hi! I'm the CoffeeGo assistant ☕
@@ -48,7 +55,8 @@ Sends investor-pack link (coffee-go.ae/investing.html), then:
 
 ## Every completed branch
 
-- Creates a Bitrix24 lead (`crm.lead.add`) with a readable summary in COMMENTS.
+- The lead reaches CoffeeGo CRM from the forwarded conversation. Bitrix24
+  (`crm.lead.add`) is off since 12.10.2026 — only with `BITRIX_LEADS=1`.
 - Sends the user CoffeeGo's direct contact (+971 58 532 9288, coffee-go.ae).
 - Pings the Telegram admin chat (if configured) so a human sees it in real time.
 
