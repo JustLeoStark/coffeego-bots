@@ -97,8 +97,7 @@ https URL it prints as `PUBLIC_URL`.
   карточку лида или клиента одной лентой с WhatsApp; новый собеседник
   становится лидом «Telegram»;
 - каждую заявку с сайта (Netlify, кроме подписки на новости) —
-  `POST CRM_URL/integrations/web-lead`: лид «Сайт». В Bitrix — только при
-  `BITRIX_LEADS=1`.
+  `POST CRM_URL/integrations/web-lead`: лид «Сайт».
 
 Подпись: `X-Timestamp` (секунды) и `X-Signature: sha256=<hex>`, hex —
 HMAC-SHA256 секретом `CRM_INGEST_SECRET` от строки
@@ -207,7 +206,7 @@ WhatsApp флаг не трогает. Пересылку в CRM выключи�
 Все сообщения `sendTelegram` уходят простым текстом, без `parse_mode`: в них
 попадают имя и слова клиента и поля заявки с сайта.
 
-`GET /version` показывает `crm`, `bitrix`, `crm_intake` и `telegram_webhook_secret` —
+`GET /version` показывает `crm`, `crm_intake` и `telegram_webhook_secret` —
 включены ли (без адресов и ключей). Проверки: `npm test` — без сети:
 Telegram и CRM — локальные серверы в тесте.
 
@@ -246,4 +245,4 @@ Netlify подписывает каждый вызов заголовком `X-W
 
 The bot forwards every website form to the sales responsible (`/assign sales <id>`),
 copies the admin and sends it to CoffeeGo CRM as a lead (except newsletter sign-ups).
-A Bitrix lead is created only with `BITRIX_LEADS=1` and the webhook configured.
+Leads go only to CoffeeGo CRM.
