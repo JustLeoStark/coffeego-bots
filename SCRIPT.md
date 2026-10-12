@@ -78,6 +78,9 @@ Sends investor-pack link (coffee-go.ae/investing.html), then:
   does not answer them at all and does not ping the team; their messages still
   go to the CRM. Lifted only when the CRM returns the contact to leads / "Bring
   the bot back".
+- When the CRM runs the intake (Kofik), the bot does not answer clients, but
+  the team still gets one «🔔 Новое обращение в Telegram» per client per day
+  (owner 12.10: leads go to the CRM and to Telegram, as before).
 - Unrecognised menu input re-shows the 4 options.
 
 ## Ideas to extend later

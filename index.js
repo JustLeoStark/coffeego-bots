@@ -25,6 +25,7 @@ import {
   setHandoff, getHandoff, clearHandoff, resolveAgents, addLearned,
   logTicket, logFirstReply, regionStats, teamStatus,
   setPause, clearPause, pauseState, setSilence, clearSilence, setIntake, intakeOn,
+  firstIntakeTouch,
 } from "./store.js";
 import {
   regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
@@ -377,6 +378,15 @@ app.post("/telegram/webhook", async (req, res) => {
     // ней при приёме CRM только закрывает её — меню не показываем
     if (pause === "intake") {
       if (ho) await clearHandoff(chatId);
+      // Команде в Telegram — как раньше о лиде (владелец 12.10: «в CRM и
+      // Telegram»): раз в сутки на клиента, отвечает Кофик в CRM
+      if (await firstIntakeTouch(chatId)) {
+        const head = `🔔 Новое обращение в Telegram: ${clientName} [#${chatId}] — отвечает Кофик, переписка в CRM`;
+        for (const id of await leadRecipients(ADMIN)) {
+          if (photoId) await sendPhotoToChat(id, photoId, `${head}${msg.caption ? "\n" + msg.caption : ""}`);
+          else await sendTelegram(id, `${head}\n${text}`);
+        }
+      }
       return;
     }
     // Отвечает человек (из CRM или через бота) — бот молчит: сообщение

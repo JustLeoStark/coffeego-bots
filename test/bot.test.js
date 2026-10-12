@@ -409,7 +409,7 @@ test("intake: только подписанный вызов CRM, nonce одно
   assert.equal(version.bitrix, undefined, "Bitrix24 из бота удалён");
 });
 
-test("приём ведёт CRM: на /start, текст и фото бот молчит, всё — в CRM, команде — ничего", async () => {
+test("приём ведёт CRM: на /start, текст и фото бот молчит, всё — в CRM, команде — одно «новое обращение» в сутки", async () => {
   // Текущий разговор: клиент 81 уже в меню сценария
   await say(81, "/start");
   await say(81, "1");
@@ -422,7 +422,11 @@ test("приём ведёт CRM: на /start, текст и фото бот мо
     await say(80, undefined, { caption: "our kitchen", photo: [{ file_id: "kitchen-1", width: 800, height: 600 }] });
     await say(80, "menu");
     assert.equal(sentTo(80).length, 0, "ни сценария, ни ИИ, ни приветствия");
-    assert.equal(toTeamAbout(80).length + photosAbout(80).length, 0, "команде — ни «новый лид», ни фото");
+    // Команде — как раньше о лиде (владелец 12.10: «в CRM и Telegram»),
+    // но одно сообщение в сутки на клиента, а не каждое
+    const team80 = toTeamAbout(80).concat(photosAbout(80));
+    assert.equal(team80.length, 1, "команде — одно «новое обращение»");
+    assert.ok(JSON.stringify(team80[0].body).includes("Новое обращение в Telegram"));
     const got = crmMessages(80).filter((m) => m.direction === "in");
     assert.deepEqual(got.map((m) => m.text),
                      ["/start", "Hi, I need a coffee machine for my office", "human", "our kitchen", "menu"]);
@@ -432,7 +436,8 @@ test("приём ведёт CRM: на /start, текст и фото бот мо
     // Текущий разговор тоже замолк — посреди сценария
     for (const text of ["Dubai", "40", "Ivan", "+971 50 111 2222"]) await say(81, text);
     assert.equal(sentTo(81).length, 2, "сценарий не продолжился");
-    assert.equal(toTeamAbout(81).length, 0, "лид из сценария команде не ушёл");
+    assert.equal(toTeamAbout(81).filter((c) => !JSON.stringify(c.body).includes("Новое обращение")).length, 0,
+                 "лид из сценария бота команде не ушёл — только «новое обращение»");
     assert.ok(crmMessages(81).some((m) => m.text === "+971 50 111 2222"));
 
     // Пауза (человек из CRM ответил) — как раньше: молчим, команде уведомление

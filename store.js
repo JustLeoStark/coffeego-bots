@@ -446,6 +446,13 @@ export async function setSilence(chatId) {
 export async function clearSilence(chatId) {
   await cmd(["DEL", `silence:${chatId}`]);
 }
+// Приём ведёт CRM: команде в Telegram — «новое обращение» один раз в сутки
+// на клиента (владелец 12.10: «как сейчас — в CRM и Telegram»), а не на
+// каждое сообщение. true — этот раз первый, надо сообщить
+export async function firstIntakeTouch(chatId) {
+  const set = await cmd(["SET", `intake_seen:${chatId}`, String(Date.now()), "NX", "EX", "86400"]);
+  return set === "OK";
+}
 export async function isSilenced(chatId) {
   return Boolean(await cmd(["GET", `silence:${chatId}`]));
 }
