@@ -611,8 +611,14 @@ const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(imp
 const PORT = process.env.PORT || 3000;
 if (isMain) app.listen(PORT, async () => {
   console.log(`CoffeeGo bot listening on :${PORT}`);
-  if (process.env.PUBLIC_URL) await setTelegramWebhook(process.env.PUBLIC_URL);
-  await setTelegramCommands(ADMIN);
+  // Telegram не ответил при запуске (на сервере CRM 30.10 бывали таймауты
+  // соединения) — не падаем: вебхук и меню уже стоят с прошлого запуска
+  try {
+    if (process.env.PUBLIC_URL) await setTelegramWebhook(process.env.PUBLIC_URL);
+    await setTelegramCommands(ADMIN);
+  } catch (e) {
+    console.error("[telegram] вебхук или меню при запуске не выставлены:", e.message);
+  }
   startCrmRetry();
   if (netlifyProblem()) console.error(`[netlify] приём заявок с сайта ВЫКЛЮЧЕН: ${netlifyProblem()}`);
 
