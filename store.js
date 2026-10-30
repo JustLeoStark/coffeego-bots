@@ -453,6 +453,12 @@ export async function firstIntakeTouch(chatId) {
   const set = await cmd(["SET", `intake_seen:${chatId}`, String(Date.now()), "NX", "EX", "86400"]);
   return set === "OK";
 }
+// Отвечает человек: команде в Telegram — только первое сообщение клиента
+// (владелец 30.10: «только первое»), дальше переписка — в CRM. Раз в сутки
+export async function firstPausedTouch(chatId) {
+  const set = await cmd(["SET", `paused_seen:${chatId}`, String(Date.now()), "NX", "EX", "86400"]);
+  return set === "OK";
+}
 export async function isSilenced(chatId) {
   return Boolean(await cmd(["GET", `silence:${chatId}`]));
 }

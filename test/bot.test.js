@@ -371,6 +371,20 @@ test("пауза CRM до двух недель — по-прежнему не �
   assert.ok(until > Date.now() && until <= Date.now() + 7 * 86400 * 1000 + 1000);
 });
 
+test("отвечает человек: команде только первое сообщение клиента, остальные — в CRM", async () => {
+  const until = Math.floor(Date.now() / 1000) + 3600;
+  assert.equal((await handoff({ chat_id: 74, action: "pause", until })).status, 200);
+  const toTeam = () => tgCalls.filter((c) => c.method === "sendMessage" &&
+    Number(c.body.chat_id) !== 74 && String(c.body.text || "").includes("[#74]")).length;
+  const crmBefore = crmMessages(74).length;
+  await say(74, "office machine");
+  await say(74, "hi");
+  await say(74, "+971 55 111 2233");
+  assert.equal(toTeam(), 1, "команде — одно уведомление");
+  assert.equal(crmMessages(74).length, crmBefore + 3, "в CRM — все три");
+  assert.equal(sentTo(74).length, 0, "бот клиенту молчит");
+});
+
 // ---- Приём ведёт CRM (владелец 12.10.2026) ----
 
 async function intake(enabled) {

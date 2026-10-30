@@ -26,6 +26,7 @@ import {
   logTicket, logFirstReply, regionStats, teamStatus,
   setPause, clearPause, pauseState, setSilence, clearSilence, setIntake, intakeOn,
   firstIntakeTouch,
+  firstPausedTouch,
 } from "./store.js";
 import {
   regionOf, isWorkingHours, outOfHoursNote, REGION_NAMES, DEFAULT_REGION,
@@ -392,10 +393,13 @@ app.post("/telegram/webhook", async (req, res) => {
     // Отвечает человек (из CRM или через бота) — бот молчит: сообщение
     // уже в CRM, команде — уведомление, как при запросе человека
     if (pause !== "free") {
+      // Человек уже ведёт разговор в CRM: команде — только первое сообщение,
+      // остальные — в карточке (владелец 30.10). Сбой хранилища — каждое
+      if (pause === "paused" && !(await firstPausedTouch(chatId))) return;
       const sess = getSession(`telegram:${chatId}`);
       for (const agent of await resolveAgents(sess.data && sess.data.category || "Human hand-off")) {
         const head = pause === "paused"
-          ? `📩 [#${chatId}] ${clientName} (отвечает человек, бот молчит)`
+          ? `📩 [#${chatId}] ${clientName} (отвечает человек, бот молчит; дальше переписка — в CRM)`
           : `📩 [#${chatId}] ${clientName} (сбой хранилища — бот молчит, ответьте сами)`;
         if (photoId) await sendPhotoToChat(agent, photoId, `${head}${msg.caption ? ": " + msg.caption : ""}`);
         else await sendTelegram(agent, `${head}: ${text}`);
